@@ -132,19 +132,20 @@ def get_us_stocks():
         "USAR - US Gold Corp": "USAU"
     }
 
-# 3. 채권(Bonds / Yields) 리스트 추가
+# 3. 채권(Bonds) 리스트 (안정적인 글로벌 & 국내 국채 종목으로 교체)
 def get_bonds():
     return {
-        "US 10Y Yield (미국 10년물 국채금리)": "US10YT",
-        "US 2Y Yield (미국 2년물 국채금리)": "US2YT",
-        "US 30Y Yield (미국 30년물 국채금리)": "US30YT",
-        "US 3M Yield (미국 3개월물 국채금리)": "US3MT",
-        "KR 10Y Yield (한국 10년물 국채금리)": "KR10YT",
-        "KR 3Y Yield (한국 3년물 국채금리)": "KR3YT",
-        "TLT (미국 20년 이상 장기국채 ETF)": "TLT",
+        "TLT (미국 20년+ 장기국채 ETF)": "TLT",
         "IEF (미국 7-10년 중기국채 ETF)": "IEF",
         "SHY (미국 1-3년 단기국채 ETF)": "SHY",
-        "TMF (미국 20년+ 국채 3배 레버리지 ETF)": "TMF"
+        "TMF (미국 20년+ 국채 3X 레버리지)": "TMF",
+        "^TNX (미국 10년물 국채 수익률 지수)": "^TNX",
+        "^TYX (미국 30년물 국채 수익률 지수)": "^TYX",
+        "^IRX (미국 13주 단기국채 수익률 지수)": "^IRX",
+        "KOSEF 국고채10년 (한국 10년 국채 ETF)": "148070",
+        "KBSTAR 국고채3년 (한국 3년 국채 ETF)": "385560",
+        "ACE 미국30년국채액티브(H)": "453850",
+        "BND (Vanguard 종합채권 ETF)": "BND"
     }
 
 # 4. 원자재(Commodities) 리스트
