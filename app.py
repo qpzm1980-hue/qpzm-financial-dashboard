@@ -9,6 +9,53 @@ from plotly.subplots import make_subplots
 # 페이지 설정
 st.set_page_config(page_title="글로벌 종합 금융 프로 터미널", layout="wide", initial_sidebar_state="expanded")
 
+# ==================== 1. 비공개 접속 비밀번호 인증 ====================
+def check_password():
+    # 1) 이미 비밀번호를 통과한 세션인지 확인
+    if st.session_state.get("authenticated", False):
+        return True
+
+    # 2) Secrets에 비밀번호 설정이 있는지 확인
+    app_pwd = st.secrets.get("APP_PASSWORD", None)
+    
+    # Secrets가 설정되지 않았다면 기본값으로 방어 (누구나 접근 방지)
+    if not app_pwd:
+        st.warning("⚠️ Streamlit Secrets에 APP_PASSWORD가 설정되지 않았습니다. 관리자 설정을 확인하세요.")
+        return False
+
+    # 3) 로그인 화면 출력
+    st.markdown("<h2 style='text-align: center;'>🔒 프라이빗 금융 대시보드</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center; color: gray;'>이 대시보드는 비공개 보안 페이지입니다. 접속 비밀번호를 입력하세요.</p>", unsafe_allow_html=True)
+    
+    _, col, _ = st.columns([1, 2, 1])
+    with col:
+        user_input = st.text_input("접속 비밀번호", type="password", placeholder="비밀번호를 입력하세요")
+        if st.button("대시보드 접속", use_container_width=True):
+            if str(user_input).strip() == str(app_pwd).strip():
+                st.session_state["authenticated"] = True
+                st.rerun()
+            else:
+                st.error("❌ 비밀번호가 올바르지 않습니다. 다시 입력해 주세요.")
+                
+    return False
+
+# 인증되지 않은 사용자는 이후 코드 실행 중단
+if not check_password():
+    st.stop()
+
+# ==================== 2. 본문 대시보드 화면 ====================
+
+import datetime
+import streamlit as st
+import pandas as pd
+import numpy as np
+import FinanceDataReader as fdr
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+# 페이지 설정
+st.set_page_config(page_title="글로벌 종합 금융 프로 터미널", layout="wide", initial_sidebar_state="expanded")
+
 # 커스텀 다크 스타일 CSS
 st.markdown("""
 <style>
