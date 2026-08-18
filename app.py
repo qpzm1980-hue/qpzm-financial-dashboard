@@ -235,7 +235,7 @@ display_start_date = today - datetime.timedelta(days=period_options[selected_per
 fetch_start_date = display_start_date - datetime.timedelta(days=400)
 
 # ==================== 데이터 및 지표 계산 함수 ====================
-@st.cache_data
+@st.cache_data(ttl=10)
 def load_and_calculate_data(code, start_date, tf):
     df = fdr.DataReader(code, start_date)
     if df is None or df.empty:
