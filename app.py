@@ -22,7 +22,7 @@ def get_krx_stocks():
             "삼성바이오로직스": "207940", "현대차": "005380", "셀트리온": "068270"
         }
 
-# 2. 해외/미국 요청 관심 종목 리스트
+# 2. 해외/미국 관심 종목 리스트
 def get_us_stocks():
     return {
         "TSLA - Tesla": "TSLA",
@@ -207,41 +207,3 @@ try:
 
 except Exception as e:
     st.error(f"데이터 조회 중 오류: {e}")
-
-
-
-# 1. 패키지 및 Cloudflared 설치
-!pip install streamlit finance-datareader plotly -q
-!wget -q -O cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
-!chmod +x cloudflared
-
-# 2. 프로세스 초기화
-!pkill -f streamlit
-!pkill -f cloudflared
-
-# 3. Streamlit 앱 백그라운드 구동
-import time
-import subprocess
-import re
-
-!streamlit run app.py --server.port 8501 --server.address 127.0.0.1 --server.enableCORS false --server.enableXsrfProtection false &>/dev/null &
-time.sleep(3)
-
-# 4. Cloudflare 터널 실행 및 링크 자동 추출
-tunnel_process = subprocess.Popen(
-    ["./cloudflared", "tunnel", "--url", "http://127.0.0.1:8501"],
-    stdout=subprocess.PIPE,
-    stderr=subprocess.STDOUT,
-    text=True
-)
-
-for _ in range(40):
-    line = tunnel_process.stdout.readline()
-    if "trycloudflare.com" in line:
-        urls = re.findall(r'https://[a-zA-Z0-9-]+\.trycloudflare\.com', line)
-        if urls:
-            print("\n" + "=" * 65)
-            print(f"🎉 복구 완료! 아래 파란색 링크를 클릭하세요:\n👉 {urls[0]}")
-            print("=" * 65 + "\n")
-            break
-    time.sleep(0.3)
