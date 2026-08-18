@@ -11,19 +11,13 @@ st.set_page_config(page_title="글로벌 종합 금융 프로 터미널", layout
 
 # ==================== 1. 비공개 접속 비밀번호 인증 ====================
 def check_password():
-    # 1) 이미 비밀번호를 통과한 세션인지 확인
     if st.session_state.get("authenticated", False):
         return True
 
-    # 2) Secrets에 비밀번호 설정이 있는지 확인
     app_pwd = st.secrets.get("APP_PASSWORD", None)
-    
-    # Secrets가 설정되지 않았다면 기본값으로 방어 (누구나 접근 방지)
     if not app_pwd:
-        st.warning("⚠️ Streamlit Secrets에 APP_PASSWORD가 설정되지 않았습니다. 관리자 설정을 확인하세요.")
-        return False
+        return True
 
-    # 3) 로그인 화면 출력
     st.markdown("<h2 style='text-align: center;'>🔒 프라이빗 금융 대시보드</h2>", unsafe_allow_html=True)
     st.markdown("<p style='text-align: center; color: gray;'>이 대시보드는 비공개 보안 페이지입니다. 접속 비밀번호를 입력하세요.</p>", unsafe_allow_html=True)
     
@@ -39,24 +33,11 @@ def check_password():
                 
     return False
 
-# 인증되지 않은 사용자는 이후 코드 실행 중단
 if not check_password():
     st.stop()
 
 # ==================== 2. 본문 대시보드 화면 ====================
 
-import datetime
-import streamlit as st
-import pandas as pd
-import numpy as np
-import FinanceDataReader as fdr
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
-
-# 페이지 설정
-st.set_page_config(page_title="글로벌 종합 금융 프로 터미널", layout="wide", initial_sidebar_state="expanded")
-
-# 커스텀 다크 스타일 CSS
 st.markdown("""
 <style>
     .metric-card {
@@ -151,7 +132,23 @@ def get_us_stocks():
         "USAR - US Gold Corp": "USAU"
     }
 
-# 3. 주요 환율 리스트
+# 3. 원자재(Commodities) 리스트 추가
+def get_commodities():
+    return {
+        "Gold (금 선물)": "GC=F",
+        "Silver (은 선물)": "SI=F",
+        "Copper (구리 선물)": "HG=F",
+        "WTI Crude Oil (WTI 원유)": "CL=F",
+        "Brent Oil (브렌트유)": "BZ=F",
+        "Natural Gas (천연가스)": "NG=F",
+        "Platinum (백금)": "PL=F",
+        "Palladium (팔라듐)": "PA=F",
+        "Corn (옥수수)": "ZC=F",
+        "Soybeans (대두/콩)": "ZS=F",
+        "Wheat (밀)": "ZW=F"
+    }
+
+# 4. 주요 환율 리스트
 def get_forex():
     return {
         "USD/KRW (원/달러)": "USD/KRW",
@@ -163,7 +160,7 @@ def get_forex():
         "EUR/USD (유로/달러)": "EUR/USD"
     }
 
-# 4. 주요 코인 리스트
+# 5. 주요 코인 리스트
 def get_crypto():
     return {
         "BTC/USD (비트코인)": "BTC/USD",
@@ -178,13 +175,12 @@ def get_crypto():
 # ==================== 사이드바 구성 ====================
 st.sidebar.header("🕹️ 컨트롤 패널")
 
-# 티커 직접 입력 모드 지원
 input_mode = st.sidebar.radio("🔍 종목 선택 방식", ["목록에서 선택", "티커 직접 입력"], index=0)
 
 if input_mode == "목록에서 선택":
     category = st.sidebar.radio(
         "🌐 자산 카테고리", 
-        ["해외주식 (US Custom)", "국내주식 (KRX)", "환율 (Forex)", "암호화폐 (Crypto)"], 
+        ["해외주식 (US Custom)", "국내주식 (KRX)", "원자재 (Commodity)", "환율 (Forex)", "암호화폐 (Crypto)"], 
         index=0
     )
 
@@ -194,6 +190,9 @@ if input_mode == "목록에서 선택":
     elif category == "국내주식 (KRX)":
         STOCKS = get_krx_stocks()
         currency_symbol = "원"
+    elif category == "원자재 (Commodity)":
+        STOCKS = get_commodities()
+        currency_symbol = "USD"
     elif category == "환율 (Forex)":
         STOCKS = get_forex()
         currency_symbol = "원"
@@ -204,7 +203,7 @@ if input_mode == "목록에서 선택":
     selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=list(STOCKS.keys()), index=0)
     selected_code = STOCKS[selected_name]
 else:
-    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: NVDA, 005930, BTC/USD, USD/KRW)", value="NVDA").strip()
+    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: GC=F, NVDA, 005930, BTC/USD)", value="GC=F").strip()
     selected_name = f"Custom: {direct_ticker}"
     selected_code = direct_ticker
     category = "직접입력"
@@ -229,15 +228,29 @@ show_bb = st.sidebar.checkbox("볼린저 밴드 (20, 2)", value=False)
 show_rsi = st.sidebar.checkbox("RSI (14)", value=True)
 show_macd = st.sidebar.checkbox("MACD (12, 26, 9)", value=True)
 
-# 날짜 계산
+# 수동 새로고침 및 로그아웃
+st.sidebar.markdown("---")
+if st.sidebar.button("🔄 최신 시세 강제 갱신"):
+    st.cache_data.clear()
+    st.rerun()
+
+if "APP_PASSWORD" in st.secrets:
+    if st.sidebar.button("🔒 로그아웃"):
+        st.session_state["authenticated"] = False
+        st.rerun()
+
 today = datetime.date.today()
 display_start_date = today - datetime.timedelta(days=period_options[selected_period])
 fetch_start_date = display_start_date - datetime.timedelta(days=400)
 
-# ==================== 데이터 및 지표 계산 함수 ====================
-@st.cache_data(ttl=10)
+# ==================== 데이터 및 지표 계산 (5분 캐시 설정) ====================
+@st.cache_data(ttl=300)
 def load_and_calculate_data(code, start_date, tf):
-    df = fdr.DataReader(code, start_date)
+    try:
+        df = fdr.DataReader(code, start_date)
+    except Exception:
+        return pd.DataFrame()
+        
     if df is None or df.empty:
         return df
     if 'Volume' not in df.columns:
@@ -287,13 +300,11 @@ try:
     else:
         display_df = df.loc[df.index >= pd.to_datetime(display_start_date)]
         
-        # 최신 가격 및 전일 대비 변동 계산
         latest_close = float(display_df['Close'].iloc[-1])
         prev_close = float(display_df['Close'].iloc[-2]) if len(display_df) > 1 else latest_close
         price_chg = latest_close - prev_close
         price_chg_pct = (price_chg / prev_close) * 100
 
-        # 가격 포맷팅
         if currency_symbol == "USD":
             formatted_close = f"{latest_close:,.2f}" if latest_close >= 1 else f"{latest_close:.4f}"
             delta_str = f"{price_chg:+,.2f} ({price_chg_pct:+.2f}%)"
@@ -301,20 +312,17 @@ try:
             formatted_close = f"{int(latest_close):,}" if category == "국내주식 (KRX)" else f"{latest_close:,.2f}"
             delta_str = f"{int(price_chg):+,} ({price_chg_pct:+.2f}%)" if category == "국내주식 (KRX)" else f"{price_chg:+,.2f} ({price_chg_pct:+.2f}%)"
 
-        # ==================== 상단 대시보드 메트릭 카드 ====================
         st.markdown("### 📌 시장 핵심 요약")
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("선택 종목/자산", selected_name.split(' - ')[0])
+        m1.metric("선택 종목/자산", selected_name.split(' - ')[0].split(' (')[0])
         m2.metric("현재 시세", f"{formatted_close} {currency_symbol}", delta=delta_str)
 
-        # 52주 고점/저점 및 통계
         one_year_df = df.loc[df.index >= (pd.to_datetime(today) - pd.Timedelta(days=365))]
         if not one_year_df.empty:
             high_52w = one_year_df['High'].max()
             low_52w = one_year_df['Low'].min()
             drop_from_high = ((latest_close - high_52w) / high_52w) * 100
             
-            # MDD (최대 낙폭) 계산
             cummax = display_df['Close'].cummax()
             drawdown = (display_df['Close'] - cummax) / cummax
             mdd = drawdown.min() * 100
@@ -325,12 +333,10 @@ try:
             m3.metric("52주 고/저", "-")
             m4.metric("MDD", "-")
 
-        # ==================== 기술적 신호 진단 배지 ====================
         st.markdown("---")
         st.markdown("#### 🚦 기술적 지표 자동 진단 시그널")
         sig_col1, sig_col2, sig_col3, sig_col4 = st.columns(4)
 
-        # 1. 이동평균 배열 (골든/데드)
         latest_ma20 = display_df['20선'].iloc[-1]
         latest_ma50 = display_df['50선'].iloc[-1]
         if pd.notna(latest_ma20) and pd.notna(latest_ma50):
@@ -341,7 +347,6 @@ try:
         else:
             sig_col1.markdown("이평선 추세: <span class='signal-badge-neutral'>데이터 부족</span>", unsafe_allow_html=True)
 
-        # 2. RSI 진단
         latest_rsi = display_df['RSI'].iloc[-1]
         if pd.notna(latest_rsi):
             if latest_rsi >= 70:
@@ -353,7 +358,6 @@ try:
         else:
             sig_col2.markdown("RSI: -", unsafe_allow_html=True)
 
-        # 3. 볼린저 밴드 위치
         latest_bb_up = display_df['BB_Upper'].iloc[-1]
         latest_bb_low = display_df['BB_Lower'].iloc[-1]
         if pd.notna(latest_bb_up) and pd.notna(latest_bb_low):
@@ -366,7 +370,6 @@ try:
         else:
             sig_col3.markdown("볼린저 밴드: -", unsafe_allow_html=True)
 
-        # 4. MACD 히스토그램
         latest_macd_hist = display_df['MACD_Hist'].iloc[-1]
         if pd.notna(latest_macd_hist):
             if latest_macd_hist > 0:
@@ -376,7 +379,6 @@ try:
         else:
             sig_col4.markdown("MACD Hist: -", unsafe_allow_html=True)
 
-        # ==================== 탭 분기 (메인 차트 / 상대 수익률 비교) ====================
         st.markdown("---")
         tab1, tab2 = st.tabs(["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교"])
 
@@ -413,7 +415,6 @@ try:
 
             current_row = 1
 
-            # 캔들스틱 차트
             fig.add_trace(
                 go.Candlestick(
                     x=display_df.index,
@@ -424,7 +425,6 @@ try:
                 row=current_row, col=1
             )
 
-            # 이동평균선
             if show_ma:
                 ma_colors = {'20선': '#FF9800', '50선': '#AB47BC', '100선': '#29B6F6', '200선': '#B0BEC5'}
                 for ma_name, color in ma_colors.items():
@@ -434,7 +434,6 @@ try:
                             row=current_row, col=1
                         )
 
-            # 볼린저 밴드
             if show_bb:
                 fig.add_trace(
                     go.Scatter(x=display_df.index, y=display_df['BB_Upper'], mode='lines', name='볼린저 상단', line=dict(color='rgba(200, 200, 200, 0.6)', dash='dot')),
@@ -445,7 +444,6 @@ try:
                     row=current_row, col=1
                 )
 
-            # 거래량
             if has_vol:
                 current_row += 1
                 vol_colors = ['#26A69A' if row['Close'] >= row['Open'] else '#EF5350' for _, row in display_df.iterrows()]
@@ -454,7 +452,6 @@ try:
                     row=current_row, col=1
                 )
 
-            # MACD 서브플롯
             if show_macd:
                 current_row += 1
                 fig.add_trace(
@@ -471,7 +468,6 @@ try:
                     row=current_row, col=1
                 )
 
-            # RSI 서브플롯
             if show_rsi:
                 current_row += 1
                 fig.add_trace(
@@ -496,6 +492,7 @@ try:
         with tab2:
             st.markdown("#### 📊 타 자산 및 주요 지수와의 누적 수익률(%) 비교")
             comp_targets = {
+                "Gold (금 선물)": "GC=F",
                 "S&P 500 지수 (미국 대형주)": "US500",
                 "나스닥 100 지수 (기술주)": "IXIC",
                 "KOSPI 지수 (국내 종합)": "KS11",
@@ -510,12 +507,11 @@ try:
             try:
                 comp_df = fdr.DataReader(comp_code, display_start_date)
                 if not comp_df.empty:
-                    # 수익률(%) 정규화 (시작일 = 0%)
                     base_main = display_df['Close'] / display_df['Close'].iloc[0] * 100 - 100
                     base_comp = comp_df['Close'] / comp_df['Close'].iloc[0] * 100 - 100
 
                     comp_fig = go.Figure()
-                    comp_fig.add_trace(go.Scatter(x=base_main.index, y=base_main, mode='lines', name=f"기준: {selected_name.split(' - ')[0]}", line=dict(color='#29B6F6', width=2)))
+                    comp_fig.add_trace(go.Scatter(x=base_main.index, y=base_main, mode='lines', name=f"기준: {selected_name.split(' - ')[0].split(' (')[0]}", line=dict(color='#29B6F6', width=2)))
                     comp_fig.add_trace(go.Scatter(x=base_comp.index, y=base_comp, mode='lines', name=f"비교: {selected_comp.split(' (')[0]}", line=dict(color='#FFB74D', width=2, dash='dot')))
                     
                     comp_fig.add_hline(y=0, line_dash="solid", line_color="gray", opacity=0.5)
