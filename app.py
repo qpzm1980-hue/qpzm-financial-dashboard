@@ -1,6 +1,7 @@
 import datetime
 import streamlit as st
 import pandas as pd
+import numpy as np
 import FinanceDataReader as fdr
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -90,7 +91,7 @@ def get_crypto():
         "BNB/USD (바이낸스코인)": "BNB/USD"
     }
 
-# 사이드바 설정
+# ==================== 사이드바 메뉴 ====================
 category = st.sidebar.radio(
     "🌐 자산 카테고리 선택", 
     ["해외주식 (US Custom)", "국내주식 (KRX)", "환율 (Forex)", "암호화폐 (Crypto)"], 
@@ -125,12 +126,20 @@ period_options = {
 }
 selected_period = st.sidebar.select_slider("📅 조회 기간", options=list(period_options.keys()), value="1년")
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("📐 보조지표 설정")
+show_ma = st.sidebar.checkbox("이동평균선 (20/50/100/200)", value=True)
+show_bb = st.sidebar.checkbox("볼린저 밴드 (20, 2)", value=False)
+show_rsi = st.sidebar.checkbox("RSI (14)", value=True)
+show_macd = st.sidebar.checkbox("MACD (12, 26, 9)", value=True)
+
 today = datetime.date.today()
 display_start_date = today - datetime.timedelta(days=period_options[selected_period])
 fetch_start_date = display_start_date - datetime.timedelta(days=350)
 
+# ==================== 데이터 계산 및 지표 산출 ====================
 @st.cache_data
-def load_data(code, start_date, tf):
+def load_and_calculate_indicators(code, start_date, tf):
     df = fdr.DataReader(code, start_date)
     if df.empty:
         return df
@@ -146,14 +155,35 @@ def load_data(code, start_date, tf):
             'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
         }).dropna()
         
+    # 이동평균선
     df['20선'] = df['Close'].rolling(20).mean()
     df['50선'] = df['Close'].rolling(50).mean()
     df['100선'] = df['Close'].rolling(100).mean()
     df['200선'] = df['Close'].rolling(200).mean()
+
+    # 1. 볼린저 밴드 (20, 2)
+    std20 = df['Close'].rolling(20).std()
+    df['BB_Upper'] = df['20선'] + (std20 * 2)
+    df['BB_Lower'] = df['20선'] - (std20 * 2)
+
+    # 2. RSI (14)
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    # 3. MACD (12, 26, 9)
+    exp12 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp26 = df['Close'].ewm(span=26, adjust=False).mean()
+    df['MACD'] = exp12 - exp26
+    df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+    df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
+
     return df
 
 try:
-    df = load_data(selected_code, fetch_start_date, timeframe)
+    df = load_and_calculate_indicators(selected_code, fetch_start_date, timeframe)
     display_df = df.loc[df.index >= pd.to_datetime(display_start_date)]
     
     if display_df.empty:
@@ -165,18 +195,54 @@ try:
         else:
             formatted_close = f"{int(latest_close):,}" if category == "국내주식 (KRX)" else f"{latest_close:,.2f}"
 
-        col1, col2 = st.columns(2)
+        col1, col2, col3, col4 = st.columns(4)
         col1.metric("선택 자산", f"{selected_name}")
         col2.metric("최신 시세", f"{formatted_close} {currency_symbol}")
+        
+        # 지표 최신 수치 요약
+        latest_rsi = display_df['RSI'].iloc[-1]
+        col3.metric("RSI (14)", f"{latest_rsi:.1f}" if pd.notna(latest_rsi) else "-")
+        latest_macd = display_df['MACD_Hist'].iloc[-1]
+        col4.metric("MACD Hist", f"{latest_macd:.2f}" if pd.notna(latest_macd) else "-")
 
-        st.subheader(f"[{selected_name}] 최근 {selected_period} ({timeframe}) 차트")
+        st.subheader(f"[{selected_name}] 최근 {selected_period} ({timeframe}) 종합 분석 차트")
 
+        # 동적 서브플롯 행 구성
         has_vol = bool(display_df['Volume'].sum() > 0)
+        
+        rows = 1
+        subplot_titles = ["주가 및 지표"]
+        row_heights = [0.55]
+        
         if has_vol:
-            fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.75, 0.25])
-        else:
-            fig = make_subplots(rows=1, cols=1)
+            rows += 1
+            subplot_titles.append("거래량")
+            row_heights.append(0.15)
+        if show_macd:
+            rows += 1
+            subplot_titles.append("MACD (12, 26, 9)")
+            row_heights.append(0.15)
+        if show_rsi:
+            rows += 1
+            subplot_titles.append("RSI (14)")
+            row_heights.append(0.15)
+            
+        # 총 높이 정규화
+        total_h = sum(row_heights)
+        norm_heights = [h / total_h for h in row_heights]
 
+        fig = make_subplots(
+            rows=rows, 
+            cols=1, 
+            shared_xaxes=True, 
+            vertical_spacing=0.03,
+            row_heights=norm_heights,
+            subplot_titles=subplot_titles
+        )
+
+        current_row = 1
+
+        # 1. 캔들스틱 차트
         fig.add_trace(
             go.Candlestick(
                 x=display_df.index,
@@ -184,25 +250,75 @@ try:
                 low=display_df['Low'], close=display_df['Close'],
                 name='시세', increasing_line_color='red', decreasing_line_color='blue'
             ),
-            row=1, col=1
+            row=current_row, col=1
         )
 
-        ma_colors = {'20선': 'orange', '50선': 'purple', '100선': 'green', '200선': 'gray'}
-        for ma_name, color in ma_colors.items():
-            if ma_name in display_df.columns:
-                fig.add_trace(
-                    go.Scatter(x=display_df.index, y=display_df[ma_name], mode='lines', name=ma_name, line=dict(color=color, width=1.2)),
-                    row=1, col=1
-                )
+        # 2. 이동평균선
+        if show_ma:
+            ma_colors = {'20선': 'orange', '50선': 'purple', '100선': 'green', '200선': 'gray'}
+            for ma_name, color in ma_colors.items():
+                if ma_name in display_df.columns:
+                    fig.add_trace(
+                        go.Scatter(x=display_df.index, y=display_df[ma_name], mode='lines', name=ma_name, line=dict(color=color, width=1.1)),
+                        row=current_row, col=1
+                    )
 
+        # 3. 볼린저 밴드
+        if show_bb:
+            fig.add_trace(
+                go.Scatter(x=display_df.index, y=display_df['BB_Upper'], mode='lines', name='볼린저 상단', line=dict(color='rgba(150, 150, 150, 0.7)', dash='dot')),
+                row=current_row, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=display_df.index, y=display_df['BB_Lower'], mode='lines', name='볼린저 하단', line=dict(color='rgba(150, 150, 150, 0.7)', dash='dot'), fill='tonexty', fillcolor='rgba(200, 200, 200, 0.1)'),
+                row=current_row, col=1
+            )
+
+        # 4. 거래량
         if has_vol:
+            current_row += 1
             colors = ['red' if row['Close'] >= row['Open'] else 'blue' for _, row in display_df.iterrows()]
             fig.add_trace(
                 go.Bar(x=display_df.index, y=display_df['Volume'], name='거래량', marker_color=colors),
-                row=2, col=1
+                row=current_row, col=1
             )
 
-        fig.update_layout(height=650, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10), hovermode='x unified')
+        # 5. MACD 서브플롯
+        if show_macd:
+            current_row += 1
+            fig.add_trace(
+                go.Scatter(x=display_df.index, y=display_df['MACD'], mode='lines', name='MACD', line=dict(color='blue', width=1.2)),
+                row=current_row, col=1
+            )
+            fig.add_trace(
+                go.Scatter(x=display_df.index, y=display_df['MACD_Signal'], mode='lines', name='Signal', line=dict(color='red', width=1.2)),
+                row=current_row, col=1
+            )
+            hist_colors = ['red' if v >= 0 else 'blue' for v in display_df['MACD_Hist']]
+            fig.add_trace(
+                go.Bar(x=display_df.index, y=display_df['MACD_Hist'], name='MACD Hist', marker_color=hist_colors),
+                row=current_row, col=1
+            )
+
+        # 6. RSI 서브플롯
+        if show_rsi:
+            current_row += 1
+            fig.add_trace(
+                go.Scatter(x=display_df.index, y=display_df['RSI'], mode='lines', name='RSI(14)', line=dict(color='purple', width=1.5)),
+                row=current_row, col=1
+            )
+            # 과열(70) / 침체(30) 기준선
+            fig.add_hline(y=70, line_dash="dash", line_color="red", row=current_row, col=1, opacity=0.6)
+            fig.add_hline(y=30, line_dash="dash", line_color="blue", row=current_row, col=1, opacity=0.6)
+
+        total_chart_height = 550 + (rows - 1) * 150
+        fig.update_layout(
+            height=total_chart_height,
+            xaxis_rangeslider_visible=False,
+            margin=dict(l=10, r=10, t=30, b=10),
+            hovermode='x unified'
+        )
+
         st.plotly_chart(fig, use_container_width=True)
 
 except Exception as e:
