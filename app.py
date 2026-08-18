@@ -132,7 +132,22 @@ def get_us_stocks():
         "USAR - US Gold Corp": "USAU"
     }
 
-# 3. 원자재(Commodities) 리스트 추가
+# 3. 채권(Bonds / Yields) 리스트 추가
+def get_bonds():
+    return {
+        "US 10Y Yield (미국 10년물 국채금리)": "US10YT",
+        "US 2Y Yield (미국 2년물 국채금리)": "US2YT",
+        "US 30Y Yield (미국 30년물 국채금리)": "US30YT",
+        "US 3M Yield (미국 3개월물 국채금리)": "US3MT",
+        "KR 10Y Yield (한국 10년물 국채금리)": "KR10YT",
+        "KR 3Y Yield (한국 3년물 국채금리)": "KR3YT",
+        "TLT (미국 20년 이상 장기국채 ETF)": "TLT",
+        "IEF (미국 7-10년 중기국채 ETF)": "IEF",
+        "SHY (미국 1-3년 단기국채 ETF)": "SHY",
+        "TMF (미국 20년+ 국채 3배 레버리지 ETF)": "TMF"
+    }
+
+# 4. 원자재(Commodities) 리스트
 def get_commodities():
     return {
         "Gold (금 선물)": "GC=F",
@@ -148,7 +163,7 @@ def get_commodities():
         "Wheat (밀)": "ZW=F"
     }
 
-# 4. 주요 환율 리스트
+# 5. 주요 환율 리스트
 def get_forex():
     return {
         "USD/KRW (원/달러)": "USD/KRW",
@@ -160,7 +175,7 @@ def get_forex():
         "EUR/USD (유로/달러)": "EUR/USD"
     }
 
-# 5. 주요 코인 리스트
+# 6. 주요 코인 리스트
 def get_crypto():
     return {
         "BTC/USD (비트코인)": "BTC/USD",
@@ -180,7 +195,7 @@ input_mode = st.sidebar.radio("🔍 종목 선택 방식", ["목록에서 선택
 if input_mode == "목록에서 선택":
     category = st.sidebar.radio(
         "🌐 자산 카테고리", 
-        ["해외주식 (US Custom)", "국내주식 (KRX)", "원자재 (Commodity)", "환율 (Forex)", "암호화폐 (Crypto)"], 
+        ["해외주식 (US Custom)", "국내주식 (KRX)", "채권 (Bonds)", "원자재 (Commodity)", "환율 (Forex)", "암호화폐 (Crypto)"], 
         index=0
     )
 
@@ -190,6 +205,9 @@ if input_mode == "목록에서 선택":
     elif category == "국내주식 (KRX)":
         STOCKS = get_krx_stocks()
         currency_symbol = "원"
+    elif category == "채권 (Bonds)":
+        STOCKS = get_bonds()
+        currency_symbol = "%"
     elif category == "원자재 (Commodity)":
         STOCKS = get_commodities()
         currency_symbol = "USD"
@@ -202,12 +220,21 @@ if input_mode == "목록에서 선택":
 
     selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=list(STOCKS.keys()), index=0)
     selected_code = STOCKS[selected_name]
+    
+    # 채권 ETF인 경우 단위 USD로 보정
+    if category == "채권 (Bonds)" and any(etf in selected_code for etf in ["TLT", "IEF", "SHY", "TMF"]):
+        currency_symbol = "USD"
 else:
-    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: GC=F, NVDA, 005930, BTC/USD)", value="GC=F").strip()
+    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: US10YT, TLT, GC=F, NVDA, BTC/USD)", value="US10YT").strip()
     selected_name = f"Custom: {direct_ticker}"
     selected_code = direct_ticker
     category = "직접입력"
-    currency_symbol = "원" if (direct_ticker.isdigit() or "KRW" in direct_ticker) else "USD"
+    if "YT" in direct_ticker or "3MT" in direct_ticker:
+        currency_symbol = "%"
+    elif direct_ticker.isdigit() or "KRW" in direct_ticker:
+        currency_symbol = "원"
+    else:
+        currency_symbol = "USD"
 
 timeframe = st.sidebar.radio("📊 차트 주기 (봉 단위)", ["일봉", "주봉", "월봉"], index=0)
 
@@ -303,11 +330,14 @@ try:
         latest_close = float(display_df['Close'].iloc[-1])
         prev_close = float(display_df['Close'].iloc[-2]) if len(display_df) > 1 else latest_close
         price_chg = latest_close - prev_close
-        price_chg_pct = (price_chg / prev_close) * 100
+        price_chg_pct = (price_chg / prev_close) * 100 if prev_close != 0 else 0
 
         if currency_symbol == "USD":
             formatted_close = f"{latest_close:,.2f}" if latest_close >= 1 else f"{latest_close:.4f}"
             delta_str = f"{price_chg:+,.2f} ({price_chg_pct:+.2f}%)"
+        elif currency_symbol == "%":
+            formatted_close = f"{latest_close:.3f}"
+            delta_str = f"{price_chg:+.3f}%p ({price_chg_pct:+.2f}%)"
         else:
             formatted_close = f"{int(latest_close):,}" if category == "국내주식 (KRX)" else f"{latest_close:,.2f}"
             delta_str = f"{int(price_chg):+,} ({price_chg_pct:+.2f}%)" if category == "국내주식 (KRX)" else f"{price_chg:+,.2f} ({price_chg_pct:+.2f}%)"
@@ -315,7 +345,7 @@ try:
         st.markdown("### 📌 시장 핵심 요약")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("선택 종목/자산", selected_name.split(' - ')[0].split(' (')[0])
-        m2.metric("현재 시세", f"{formatted_close} {currency_symbol}", delta=delta_str)
+        m2.metric("현재 시세/금리", f"{formatted_close} {currency_symbol}", delta=delta_str)
 
         one_year_df = df.loc[df.index >= (pd.to_datetime(today) - pd.Timedelta(days=365))]
         if not one_year_df.empty:
@@ -327,7 +357,13 @@ try:
             drawdown = (display_df['Close'] - cummax) / cummax
             mdd = drawdown.min() * 100
 
-            m3.metric("52주 최고 / 최저", f"{high_52w:,.0f} / {low_52w:,.0f}" if currency_symbol=="원" else f"{high_52w:,.2f} / {low_52w:,.2f}", f"고점대비 {drop_from_high:+.1f}%")
+            if currency_symbol == "%":
+                m3.metric("52주 최고 / 최저", f"{high_52w:.3f}% / {low_52w:.3f}%", f"고점대비 {drop_from_high:+.1f}%")
+            elif currency_symbol == "원":
+                m3.metric("52주 최고 / 최저", f"{high_52w:,.0f} / {low_52w:,.0f}", f"고점대비 {drop_from_high:+.1f}%")
+            else:
+                m3.metric("52주 최고 / 최저", f"{high_52w:,.2f} / {low_52w:,.2f}", f"고점대비 {drop_from_high:+.1f}%")
+
             m4.metric("기간 내 MDD (최대 낙폭)", f"{mdd:.2f}%", delta_color="inverse")
         else:
             m3.metric("52주 고/저", "-")
@@ -385,7 +421,7 @@ try:
         with tab1:
             has_vol = bool(display_df['Volume'].sum() > 0)
             rows = 1
-            subplot_titles = ["가격 및 이평선 / 볼린저 밴드"]
+            subplot_titles = ["가격/금리 및 이평선 / 볼린저 밴드"]
             row_heights = [0.55]
             
             if has_vol:
@@ -492,6 +528,8 @@ try:
         with tab2:
             st.markdown("#### 📊 타 자산 및 주요 지수와의 누적 수익률(%) 비교")
             comp_targets = {
+                "미국 10년물 국채금리 (US10YT)": "US10YT",
+                "TLT (미국 20년+ 국채 ETF)": "TLT",
                 "Gold (금 선물)": "GC=F",
                 "S&P 500 지수 (미국 대형주)": "US500",
                 "나스닥 100 지수 (기술주)": "IXIC",
