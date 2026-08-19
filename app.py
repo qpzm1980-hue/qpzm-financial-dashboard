@@ -6,9 +6,34 @@ import yfinance as yf
 import FinanceDataReader as fdr
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import urllib.request
+import urllib.parse
+import json
 
 # 페이지 설정
 st.set_page_config(page_title="글로벌 종합 금융 프로 터미널", layout="wide", initial_sidebar_state="expanded")
+
+# ==================== 텔레그램 메시지 발송 함수 ====================
+def send_telegram_message(message: str) -> bool:
+    bot_token = st.secrets.get("TELEGRAM_BOT_TOKEN", None)
+    chat_id = st.secrets.get("TELEGRAM_CHAT_ID", None)
+    
+    if not bot_token or not chat_id:
+        return False
+        
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        payload = {
+            "chat_id": str(chat_id).strip(),
+            "text": message,
+            "parse_mode": "Markdown"
+        }
+        data = json.dumps(payload).encode('utf-8')
+        req = urllib.request.Request(url, data=data, headers={'Content-Type': 'application/json'})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            return response.status == 200
+    except Exception:
+        return False
 
 # ==================== 세션 상태 초기화 & 콜백 함수 ====================
 if "category_radio" not in st.session_state:
@@ -40,7 +65,7 @@ def select_scanner_stock(name, code):
     st.session_state["category_radio"] = "국내주식 (KRX)"
     st.session_state["custom_stock_name"] = name
     st.session_state["custom_stock_code"] = code
-    st.session_state["tab_selector"] = "📊 인터랙티브 종합 차트"  # 첫 번째 탭으로 즉시 강제 전환
+    st.session_state["tab_selector"] = "📊 인터랙티브 종합 차트"
 
 # ==================== 1. 비공개 접속 비밀번호 인증 ====================
 def check_password():
@@ -300,7 +325,20 @@ show_bb = st.sidebar.checkbox("볼린저 밴드 (20, 2)", value=False)
 show_rsi = st.sidebar.checkbox("RSI (14)", value=True)
 show_macd = st.sidebar.checkbox("MACD (12, 26, 9)", value=True)
 
-# 수동 새로고침 및 로그아웃
+# 텔레그램 연동 상태 확인 및 테스트 버튼
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔔 텔레그램 알림 봇")
+if "TELEGRAM_BOT_TOKEN" in st.secrets and "TELEGRAM_CHAT_ID" in st.secrets:
+    st.sidebar.success("✅ 텔레그램 연동 완료")
+    if st.sidebar.button("📲 테스트 알림 보내기"):
+        msg = f"🚀 *[QPZM 터미널 테스트 알림]*\n\n대시보드와 텔레그램 봇 연동이 완벽하게 완료되었습니다!\n확인 시각: `{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`"
+        if send_telegram_message(msg):
+            st.sidebar.toast("텔레그램으로 테스트 메시지를 발송했습니다!", icon="📱")
+        else:
+            st.sidebar.error("발송 실패: 봇에게 /start를 보냈는지 확인하세요.")
+else:
+    st.sidebar.info("💡 Secrets에 TELEGRAM_BOT_TOKEN과 CHAT_ID를 등록하세요.")
+
 st.sidebar.markdown("---")
 if st.sidebar.button("🔄 최신 시세 강제 갱신"):
     st.cache_data.clear()
@@ -412,7 +450,7 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
-# ==================== ⚡ 사용자 맞춤 조건 수급 돌파 스캐너 함수 ====================
+# ==================== ⚡ 사용자 맞춤 조건 수급 돌파 스캐너 ====================
 @st.cache_data(ttl=300)
 def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
     try:
@@ -500,7 +538,7 @@ def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
     except Exception:
         return pd.DataFrame(), str(datetime.date.today())
 
-# ==================== 🧊 N일간 거래대금 X억 미만 초소외주 발굴 스캐너 ====================
+# ==================== 🧊 장기 초소외주 스캐너 ====================
 @st.cache_data(ttl=600)
 def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_eok):
     try:
@@ -522,7 +560,6 @@ def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_e
             df_krx['Estimated_Amount'] = df_krx['Volume'] * df_krx['Close']
             amt_col = 'Estimated_Amount'
 
-        # 1차 필터링: 당일 거래대금도 상한선 미만 & 시가총액 범위 필터링
         min_marcap_won = min_marcap_eok * 100_000_000
         max_marcap_won = max_marcap_eok * 100_000_000
         
@@ -539,7 +576,6 @@ def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_e
         calendar_days = int(lookback_days * 1.8) + 30
         start_date = today - datetime.timedelta(days=calendar_days)
 
-        # 초소외주 정밀 분석 (시총 상위 및 거래량 있는 종목 순으로 최대 150개 검사)
         sample_cands = cands.sort_values(by='Marcap', ascending=False).head(120)
 
         for _, row in sample_cands.iterrows():
@@ -561,7 +597,6 @@ def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_e
                     avg_amt = period_amounts.mean()
                     curr_amt = period_amounts.iloc[-1]
 
-                    # 🎯 조건: N일 동안 단 하루도 상한선(max_cap_won)을 넘긴 적이 없음!
                     if max_amt < max_cap_won:
                         curr_close = hist['Close'].iloc[-1]
                         prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else curr_close
@@ -676,7 +711,6 @@ try:
 
         st.markdown("---")
         
-        # 4개 탭 구조
         tab_titles = [
             "📊 인터랙티브 종합 차트", 
             "📈 벤치마크 상대 수익률(%) 비교", 
@@ -908,8 +942,22 @@ try:
                 avg_col_name = f'{p["lookback"]}일평균(억원)'
 
                 st.markdown("---")
-                if scan_date:
-                    st.caption(f"📅 **분석 기준 거래일자:** `{scan_date}` | **적용 조건:** 직전 `{p['lookback']}일`간 `{p['threshold']:,}억` 미만 $\\rightarrow$ 당일 `{p['threshold']:,}억` 첫 돌파")
+                
+                # 텔레그램 전체 전송 버튼 헤더
+                head_col1, head_col2 = st.columns([4, 1.2])
+                with head_col1:
+                    if scan_date:
+                        st.caption(f"📅 **분석 기준 거래일자:** `{scan_date}` | **적용 조건:** 직전 `{p['lookback']}일`간 `{p['threshold']:,}억` 미만 $\\rightarrow$ 당일 `{p['threshold']:,}억` 첫 돌파")
+                with head_col2:
+                    if not surge_data.empty:
+                        if st.button("📲 텔레그램으로 전체 결과 전송", use_container_width=True):
+                            lines = [f"🚨 *[QPZM 수급 첫 폭발 감지]*", f"📅 기준일: `{scan_date}`", f"🎯 조건: {p['lookback']}일 잠복 $\\rightarrow$ {p['threshold']:,}억 돌파\n"]
+                            for _, r in surge_data.head(5).iterrows():
+                                lines.append(f"• *{r['Name']}* (`{r['Code']}`): {r['Close']:,.0f}원 ({r['ChgRate']:+.2f}%) | 대금: *{r['당일거래대금(억원)']}억* (폭증 {r['수급폭증률']:,.0f}%)")
+                            if send_telegram_message("\n".join(lines)):
+                                st.toast("텔레그램으로 알림을 전송했습니다!", icon="🚀")
+                            else:
+                                st.error("텔레그램 전송 실패")
 
                 if not surge_data.empty:
                     st.success(f"조건을 만족한 주도주 **{len(surge_data)}개**가 포착되었습니다!")
@@ -1007,8 +1055,22 @@ try:
                 max_col = f'{dp["lookback"]}일최대거래대금(억원)'
 
                 st.markdown("---")
-                if d_date:
-                    st.caption(f"📅 **기준일자:** `{d_date}` | **조건:** 최근 `{dp['lookback']}일`간 일간 최대 거래대금 `{dp['max_amt']:,}억 원 미만` & 시총 `{dp['min_marcap']}억 ~ {dp['max_marcap']:,}억 원`")
+                
+                # 텔레그램 소외주 목록 전송 버튼
+                dhead_col1, dhead_col2 = st.columns([4, 1.2])
+                with dhead_col1:
+                    if d_date:
+                        st.caption(f"📅 **기준일자:** `{d_date}` | **조건:** 최근 `{dp['lookback']}일`간 일간 최대 거래대금 `{dp['max_amt']:,}억 원 미만` & 시총 `{dp['min_marcap']}억 ~ {dp['max_marcap']:,}억 원`")
+                with dhead_col2:
+                    if not d_data.empty:
+                        if st.button("📲 소외주 Top5 텔레그램 전송", use_container_width=True):
+                            lines = [f"🧊 *[QPZM 1년 초소외주 목록]*", f"📅 기준일: `{d_date}`", f"🎯 조건: {dp['lookback']}일간 최대 거래대금 {dp['max_amt']}억 미만\n"]
+                            for _, r in d_data.head(5).iterrows():
+                                lines.append(f"• *{r['Name']}* (`{r['Code']}`): {r['Close']:,.0f}원 | 일평균: *{r[avg_col]}억* | 시총 {r['시가총액(억원)']:,}억")
+                            if send_telegram_message("\n".join(lines)):
+                                st.toast("텔레그램으로 소외주 목록을 전송했습니다!", icon="🚀")
+                            else:
+                                st.error("텔레그램 전송 실패")
 
                 if not d_data.empty:
                     st.success(f"최근 {dp['lookback']}일간 거래대금 {dp['max_amt']:,}억을 넘지 않은 초소외주 **{len(d_data)}개**가 발굴되었습니다! (평균 거래대금 적은 순 정렬)")
