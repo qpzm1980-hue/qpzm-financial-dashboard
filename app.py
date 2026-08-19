@@ -76,12 +76,12 @@ st.markdown("""
 
 st.title("📈 글로벌 종합 금융 인텔리전스 대시보드")
 
-# 1. 국내주식 시총 상위 100개
+# 1. 국내주식 시총 상위 목록
 @st.cache_data(ttl=3600)
 def get_krx_stocks():
     try:
         df = fdr.StockListing('KRX')
-        df = df.sort_values(by='Marcap', ascending=False).head(100)
+        df = df.sort_values(by='Marcap', ascending=False).head(150)
         return dict(zip(df['Name'], df['Code']))
     except Exception:
         return {
@@ -194,11 +194,19 @@ st.sidebar.header("🕹️ 컨트롤 패널")
 
 input_mode = st.sidebar.radio("🔍 종목 선택 방식", ["목록에서 선택", "티커 직접 입력"], index=0)
 
+# 세션 상태 기본값 처리
+if "selected_category" not in st.session_state:
+    st.session_state["selected_category"] = "국내주식 (KRX)"
+
 if input_mode == "목록에서 선택":
+    category_list = ["해외주식 (US Custom)", "국내주식 (KRX)", "채권 (Bonds)", "원자재 (Commodity)", "환율 (Forex)", "암호화폐 (Crypto)"]
+    cat_idx = category_list.index(st.session_state.get("selected_category", "국내주식 (KRX)")) if st.session_state.get("selected_category") in category_list else 1
+    
     category = st.sidebar.radio(
         "🌐 자산 카테고리", 
-        ["해외주식 (US Custom)", "국내주식 (KRX)", "채권 (Bonds)", "원자재 (Commodity)", "환율 (Forex)", "암호화폐 (Crypto)"], 
-        index=1
+        category_list, 
+        index=cat_idx,
+        key="selected_category"
     )
 
     if category == "해외주식 (US Custom)":
@@ -206,6 +214,12 @@ if input_mode == "목록에서 선택":
         currency_symbol = "USD"
     elif category == "국내주식 (KRX)":
         STOCKS = get_krx_stocks()
+        # 스캐너에서 선택된 종목이 기존 상위 목록에 없으면 동적 추가
+        if "custom_stock_name" in st.session_state and "custom_stock_code" in st.session_state:
+            c_name = st.session_state["custom_stock_name"]
+            c_code = st.session_state["custom_stock_code"]
+            if c_name not in STOCKS:
+                STOCKS = {c_name: c_code, **STOCKS}
         currency_symbol = "원"
     elif category == "채권 (Bonds)":
         STOCKS = get_bonds()
@@ -220,7 +234,12 @@ if input_mode == "목록에서 선택":
         STOCKS = get_crypto()
         currency_symbol = "USD"
 
-    selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=list(STOCKS.keys()), index=0)
+    # 스캐너에서 선택된 종목이 있는 경우 기본 선택값으로 동기화
+    options_list = list(STOCKS.keys())
+    default_name = st.session_state.get("custom_stock_name", options_list[0])
+    selected_idx = options_list.index(default_name) if default_name in options_list else 0
+
+    selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=options_list, index=selected_idx)
     selected_code = STOCKS[selected_name]
 else:
     direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: 005930, NVDA, USD/KRW, GC=F)", value="005930").strip()
@@ -357,7 +376,7 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
-# ==================== ⚡ 초고속(1초컷) 수급 폭발 스캐너 (10% 조건 제거) ====================
+# ==================== ⚡ 초고속 수급 폭발 스캐너 ====================
 @st.cache_data(ttl=300)
 def scan_volume_surge_stocks_fast():
     try:
@@ -391,13 +410,12 @@ def scan_volume_surge_stocks_fast():
         if amt_col is None:
             return pd.DataFrame(), scan_date
 
-        # ⚡ 1차 필터링: 당일 거래대금 2,000억 원 이상 (상승률 조건 없이 전 종목 대상)
+        # 당일 거래대금 2,000억 이상
         targets = df_krx[df_krx[amt_col] >= 200_000_000_000].copy()
 
         if targets.empty:
             return pd.DataFrame(), scan_date
 
-        # ⚡ 2차 필터링: 걸러진 종목들 중 '평소 5일 평균 거래대금이 2,000억 미만'이었던 종목만 선별
         results = []
         start_date = today - datetime.timedelta(days=35)
 
@@ -420,7 +438,6 @@ def scan_volume_surge_stocks_fast():
                     prev_5days = amounts.iloc[-6:-1]
                     avg_5d = prev_5days.mean()
 
-                    # 조건: 평소 2,000억 미만이었던 종목만 통과!
                     if avg_5d < 200_000_000_000:
                         surge_ratio = (curr_amount / avg_5d) * 100 if avg_5d > 0 else 999.0
                         results.append({
@@ -693,10 +710,10 @@ try:
             except Exception as e:
                 st.error(f"수익률 비교 중 오류: {e}")
 
-        # ==================== TAB 3. 2천억 첫 수급 폭발 스캐너 (10% 조건 제거) ====================
+        # ==================== TAB 3. 2천억 첫 수급 폭발 스캐너 (클릭 즉시 차트 연동) ====================
         with tab3:
             st.markdown("### 🔥 평소 2천억 미만 $\\rightarrow$ 당일 2천억 이상 메가 수급 폭발주")
-            st.info("💡 **필터링 로직:** 직전 5영업일 평균 거래대금이 2,000억 미만으로 조용하다가 **기준일(최근 거래일)에 2,000억 원 이상의 대규모 자금이 처음 터진 종목**을 실시간 탐색합니다. (상승률 제한 없음)")
+            st.info("💡 **원클릭 차트 이동:** 아래 포착된 종목의 **`[📊 차트 보기]`** 버튼을 클릭하면 사이드바 목록에 자동 추가되며 해당 종목의 캔들 차트로 즉시 전환됩니다.")
             
             with st.spinner("KRX 수급 급증 종목 초고속 스캔 중..."):
                 surge_data, scan_date = scan_volume_surge_stocks_fast()
@@ -707,6 +724,35 @@ try:
             if not surge_data.empty:
                 st.success(f"기준일({scan_date})에 평소 대비 2,000억 이상 수급이 터진 종목 **{len(surge_data)}개**가 포착되었습니다!")
                 
+                # 인터랙티브 버튼 카드 목록 렌더링
+                for idx, r in surge_data.iterrows():
+                    c_code = r['Code']
+                    c_name = r['Name']
+                    c_close = r['Close']
+                    c_chg = r['ChgRate']
+                    c_amt = r['당일거래대금(억원)']
+                    c_prev_amt = r['직전5일평균(억원)']
+                    c_surge = r['수급폭증률']
+                    c_marcap = r['시가총액(억원)']
+                    
+                    with st.container():
+                        col_info, col_btn = st.columns([5, 1])
+                        with col_info:
+                            st.markdown(
+                                f"**{c_name}** (`{c_code}`) | **종가:** {c_close:,.0f}원 ({c_chg:+.2f}%) | "
+                                f"**당일 거래대금:** <span style='color:#FF9800; font-weight:bold;'>{c_amt:,.1f} 억원</span> | "
+                                f"**직전5일평균:** {c_prev_amt:,.1f} 억원 (폭증률: **{c_surge:,.0f}%**) | **시총:** {c_marcap:,.0f} 억원",
+                                unsafe_allow_html=True
+                            )
+                        with col_btn:
+                            if st.button("📊 차트 보기", key=f"btn_{c_code}", use_container_width=True):
+                                st.session_state["selected_category"] = "국내주식 (KRX)"
+                                st.session_state["custom_stock_name"] = c_name
+                                st.session_state["custom_stock_code"] = c_code
+                                st.rerun()
+                        st.markdown("---")
+
+                # 전체 데이터프레임 뷰
                 st.dataframe(
                     surge_data.style.format({
                         'Close': '{:,.0f}원',
@@ -717,7 +763,7 @@ try:
                         '시가총액(억원)': '{:,.0f} 억'
                     }),
                     use_container_width=True,
-                    height=450
+                    height=250
                 )
             else:
                 st.warning(f"기준일({scan_date})에 '평소 2천억 미만 $\\rightarrow$ 2천억 돌파' 조건을 만족하는 종목이 없습니다.")
