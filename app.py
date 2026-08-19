@@ -229,19 +229,19 @@ else:
     category = "직접입력"
     currency_symbol = "원" if (direct_ticker.isdigit() or "KRW" in direct_ticker) else "USD"
 
-# 주기 설정 및 요청하신 기본 조회기간 매핑 적용
+# 주기 설정 및 매핑
 tf_config = {
     "5분봉": {"default": "1일", "options": ["1일", "3일", "5일", "1개월", "2개월"], "interval": "5m"},
     "30분봉": {"default": "5일", "options": ["5일", "1개월", "2개월"], "interval": "30m"},
     "1시간봉": {"default": "1개월", "options": ["5일", "1개월", "2개월", "6개월"], "interval": "60m"},
     "일봉": {"default": "6개월", "options": ["1달", "6개월", "1년", "3년", "5년", "10년"], "interval": "1d"},
     "주봉": {"default": "1년", "options": ["6개월", "1년", "3년", "5년", "10년"], "interval": "1wk"},
-    "월봉": {"default": "5년", "options": ["1년", "3년", "5년", "10년"], "interval": "1mo"}
+    "월봉": {"default": "5년", "options": ["1년", "3년", "5년", "10년", "최대(All)"], "interval": "1mo"}
 }
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⏱️ 차트 주기 & 기간")
-timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=3) # 기본값: 일봉
+timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=3)
 
 current_cfg = tf_config[timeframe]
 selected_period = st.sidebar.select_slider(
@@ -268,10 +268,10 @@ if "APP_PASSWORD" in st.secrets:
         st.session_state["authenticated"] = False
         st.rerun()
 
-# ==================== 데이터 및 지표 계산 함수 ====================
+# ==================== 데이터 및 지표 계산 함수 (정밀 캔들 변환) ====================
 period_map_yf = {
     "1일": "1d", "3일": "3d", "5일": "5d", "1달": "1mo", "1개월": "1mo", 
-    "2개월": "2mo", "6개월": "6mo", "1년": "1y", "3년": "3y", "5년": "5y", "10년": "10y"
+    "2개월": "2mo", "6개월": "6mo", "1년": "1y", "3년": "3y", "5년": "5y", "10년": "10y", "최대(All)": "max"
 }
 
 @st.cache_data(ttl=60)
@@ -298,11 +298,15 @@ def load_and_calculate_data(code, tf, period_str):
         if df.empty:
             return df
     else:
-        # 2) 일봉/주봉/월봉 조회
+        # 2) 일봉/주봉/월봉 조회 (과거 200개 이상 충분한 데이터 로드)
         today = datetime.date.today()
-        days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
-        d_days = days_calc.get(period_str, 365)
-        start_d = today - datetime.timedelta(days=d_days + 350)
+        if tf == "월봉":
+            start_d = today - datetime.timedelta(days=365 * 25) # 월봉 200선을 위해 최대 25년 확보
+        elif tf == "주봉":
+            start_d = today - datetime.timedelta(days=365 * 10) # 주봉 200선을 위해 10년 확보
+        else:
+            days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10, "최대(All)": 365*20}
+            start_d = today - datetime.timedelta(days=days_calc.get(period_str, 365) + 400)
         
         try:
             df = fdr.DataReader(code, start_d)
@@ -312,15 +316,16 @@ def load_and_calculate_data(code, tf, period_str):
         if df.empty:
             return df
 
+        # 먼저 주봉/월봉으로 완벽히 리샘플링
         if tf == "주봉":
-            df = df.resample('W').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
+            df = df.resample('W-FRI').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
         elif tf == "월봉":
             df = df.resample('ME').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
 
     if 'Volume' not in df.columns:
         df['Volume'] = 0
 
-    # 기술적 지표 산출
+    # 리샘플링 완료된 캔들 기준으로 기술적 지표 산출
     df['20선'] = df['Close'].rolling(20).mean()
     df['50선'] = df['Close'].rolling(50).mean()
     df['100선'] = df['Close'].rolling(100).mean()
@@ -342,12 +347,12 @@ def load_and_calculate_data(code, tf, period_str):
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
-    # 일봉/주봉/월봉 슬라이싱
+    # 기간별 캔들 개수 정확하게 슬라이싱
     if "m" not in interval:
-        today = datetime.date.today()
-        days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
-        disp_start = today - datetime.timedelta(days=days_calc.get(period_str, 365))
-        df = df.loc[df.index >= pd.to_datetime(disp_start)]
+        if period_str != "최대(All)":
+            days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
+            disp_start = today - datetime.timedelta(days=days_calc.get(period_str, 365*5))
+            df = df.loc[df.index >= pd.to_datetime(disp_start)]
 
     return df
 
