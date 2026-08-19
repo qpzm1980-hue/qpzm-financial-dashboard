@@ -24,7 +24,7 @@ def select_scanner_stock(name, code):
     st.session_state["category_radio"] = "국내주식 (KRX)"
     st.session_state["custom_stock_name"] = name
     st.session_state["custom_stock_code"] = code
-    st.session_state["tab_selector"] = "📊 인터랙티브 종합 차트"  # 첫 번째 탭으로 즉시 강제 전환
+    st.session_state["tab_selector"] = "📊 인터랙티브 종합 차트"
 
 # ==================== 1. 비공개 접속 비밀번호 인증 ====================
 def check_password():
@@ -396,7 +396,7 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
-# ==================== ⚡ 500억 기준 정밀 첫 수급 돌파 스캐너 ====================
+# ==================== ⚡ 500억 기준 정밀 첫 수급 돌파 스캐너 (직전 거래일 대비 실제 등락률 계산) ====================
 @st.cache_data(ttl=300)
 def scan_volume_surge_stocks_50b():
     try:
@@ -411,12 +411,6 @@ def scan_volume_surge_stocks_50b():
         if df_krx.empty:
             return pd.DataFrame(), scan_date
 
-        chg_col = None
-        for col in ['ChgRate', 'ChangesRatio', 'Change', 'chg_rate']:
-            if col in df_krx.columns:
-                chg_col = col
-                break
-
         amt_col = None
         for col in ['Amount', 'TradeValue', 'amount', 'VolumeValue']:
             if col in df_krx.columns:
@@ -430,7 +424,7 @@ def scan_volume_surge_stocks_50b():
         if amt_col is None:
             return pd.DataFrame(), scan_date
 
-        # 당일 500억 이상 유입된 종목 1차 추출 (50,000,000,000원)
+        # 당일 500억 이상 유입된 종목 1차 추출
         targets = df_krx[df_krx[amt_col] >= 50_000_000_000].copy()
 
         if targets.empty:
@@ -443,8 +437,6 @@ def scan_volume_surge_stocks_50b():
             code = str(row['Code']).zfill(6)
             name = row['Name']
             curr_amount = row[amt_col]
-            chg_rate = row[chg_col] if chg_col else 0.0
-            close_val = row['Close']
             marcap_val = row.get('Marcap', 0)
 
             try:
@@ -456,21 +448,25 @@ def scan_volume_surge_stocks_50b():
                         amounts = hist['Close'] * hist['Volume']
 
                     prev_5days = amounts.iloc[-6:-1]
-                    max_5d = prev_5days.max()           # 직전 5일간 일간 최대 거래대금
-                    avg_5d = prev_5days.mean()          # 직전 5일 평균 거래대금
-                    yesterday_amt = prev_5days.iloc[-1] # 바로 어제 거래대금
+                    max_5d = prev_5days.max()
+                    avg_5d = prev_5days.mean()
+                    yesterday_amt = prev_5days.iloc[-1]
 
                     # 🎯 500억 정밀 조건:
-                    # 1) 직전 5영업일 중 단 하루도 500억을 넘긴 적이 없음 (잠복기 후 첫 돌파)
-                    # 2) 당일 거래대금이 어제 거래대금보다 큼 (수급 증가)
+                    # 1) 직전 5영업일 중 단 하루도 500억을 넘긴 적이 없음
+                    # 2) 당일 거래대금이 어제 거래대금보다 큼
                     if max_5d < 50_000_000_000 and curr_amount > yesterday_amt:
+                        # 💡 직전 거래일 대비 실제 등락률 계산
+                        curr_close = hist['Close'].iloc[-1]
+                        prev_close = hist['Close'].iloc[-2]
+                        real_chg_rate = ((curr_close - prev_close) / prev_close) * 100 if prev_close != 0 else 0.0
+
                         surge_ratio = (curr_amount / avg_5d) * 100 if avg_5d > 0 else 999.0
                         results.append({
-                            '기준일자': scan_date,
                             'Code': code,
                             'Name': name,
-                            'Close': close_val,
-                            'ChgRate': chg_rate,
+                            'Close': curr_close,
+                            'ChgRate': real_chg_rate,
                             '당일거래대금(억원)': round(curr_amount / 100_000_000, 1),
                             '어제거래대금(억원)': round(yesterday_amt / 100_000_000, 1),
                             '직전5일평균(억원)': round(avg_5d / 100_000_000, 1),
@@ -748,7 +744,7 @@ try:
         else:
             # 🔥 500억 첫 수급 폭발주 스캐너
             st.markdown("### 🔥 직전 5일간 500억 미만 $\\rightarrow$ 당일 500억 이상 첫 수급 폭발주")
-            st.info("💡 **500억 정밀 조건:** 직전 5영업일 동안 **단 하루도 500억을 넘긴 적이 없다가**, 당일 처음으로 500억 원 돌파 및 **어제보다 거래대금이 증가한 진짜 수급 분출 종목**만 포착합니다.")
+            st.info("💡 **500억 정밀 조건:** 직전 5영업일 동안 **단 하루도 500억을 넘긴 적이 없다가**, 당일 처음으로 500억 원 돌파 및 **직전 거래일 대비 거래대금이 증가한 진짜 수급 분출 종목**만 포착합니다.")
             
             with st.spinner("KRX 500억 수급 첫 돌파 종목 탐색 중..."):
                 surge_data, scan_date = scan_volume_surge_stocks_50b()
@@ -759,6 +755,24 @@ try:
             if not surge_data.empty:
                 st.success(f"기준일({scan_date})에 첫 500억 수급 돌파 종목 **{len(surge_data)}개**가 포착되었습니다!")
                 
+                # 1. 상단 전체 테이블 배치 (스크롤 없이 전체 높이 표시, 기준일자 제외)
+                st.dataframe(
+                    surge_data.style.format({
+                        'Close': '{:,.0f}원',
+                        'ChgRate': '{:+.2f}%',
+                        '당일거래대금(억원)': '{:,.1f} 억',
+                        '어제거래대금(억원)': '{:,.1f} 억',
+                        '직전5일평균(억원)': '{:,.1f} 억',
+                        '수급폭증률': '{:,.0f}%',
+                        '시가총액(억원)': '{:,.0f} 억'
+                    }),
+                    use_container_width=True
+                )
+                
+                st.markdown("---")
+                st.markdown("#### 🎯 종목별 상세 보기 및 원클릭 차트 이동")
+                
+                # 2. 하단 개별 바로가기 카드 배치
                 for idx, r in surge_data.iterrows():
                     c_code = r['Code']
                     c_name = r['Name']
@@ -788,20 +802,6 @@ try:
                                 use_container_width=True
                             )
                         st.markdown("---")
-
-                st.dataframe(
-                    surge_data.style.format({
-                        'Close': '{:,.0f}원',
-                        'ChgRate': '{:+.2f}%',
-                        '당일거래대금(억원)': '{:,.1f} 억',
-                        '어제거래대금(억원)': '{:,.1f} 억',
-                        '직전5일평균(억원)': '{:,.1f} 억',
-                        '수급폭증률': '{:,.0f}%',
-                        '시가총액(억원)': '{:,.0f} 억'
-                    }),
-                    use_container_width=True,
-                    height=250
-                )
             else:
                 st.warning(f"기준일({scan_date})에 '직전 5일간 500억 미만 유지 $\\rightarrow$ 당일 500억 첫 돌파' 조건을 만족하는 종목이 없습니다.")
 
