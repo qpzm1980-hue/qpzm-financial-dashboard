@@ -198,7 +198,7 @@ if input_mode == "목록에서 선택":
     category = st.sidebar.radio(
         "🌐 자산 카테고리", 
         ["해외주식 (US Custom)", "국내주식 (KRX)", "채권 (Bonds)", "원자재 (Commodity)", "환율 (Forex)", "암호화폐 (Crypto)"], 
-        index=0
+        index=4
     )
 
     if category == "해외주식 (US Custom)":
@@ -223,7 +223,7 @@ if input_mode == "목록에서 선택":
     selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=list(STOCKS.keys()), index=0)
     selected_code = STOCKS[selected_name]
 else:
-    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: GC=F, NVDA, 005930, BTC-USD)", value="NVDA").strip()
+    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: USD/KRW, GC=F, NVDA, 005930)", value="USD/KRW").strip()
     selected_name = f"Custom: {direct_ticker}"
     selected_code = direct_ticker
     category = "직접입력"
@@ -241,7 +241,7 @@ tf_config = {
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⏱️ 차트 주기 & 기간")
-timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=3)
+timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=2) # 1시간봉 기본
 
 current_cfg = tf_config[timeframe]
 selected_period = st.sidebar.select_slider(
@@ -268,7 +268,7 @@ if "APP_PASSWORD" in st.secrets:
         st.session_state["authenticated"] = False
         st.rerun()
 
-# ==================== 데이터 로드 및 지표 산출 ====================
+# ==================== 데이터 및 지표 계산 (환율/코인 분봉 티커 자동 변환) ====================
 period_map_yf = {
     "1일": "1d", "3일": "3d", "5일": "5d", "1달": "1mo", "1개월": "1mo", 
     "2개월": "2mo", "6개월": "6mo", "1년": "1y", "3년": "3y", "5년": "5y", "10년": "10y", "최대(All)": "max"
@@ -285,7 +285,13 @@ def load_and_calculate_data(code, tf, period_str):
         if code.isdigit() and len(code) == 6:
             yf_code = f"{code}.KS"
         elif "/" in code:
-            yf_code = code.replace("/", "-")
+            # 환율인 경우 USD/KRW -> USDKRW=X 변환
+            c_base, c_quote = code.split("/")
+            if c_quote in ["KRW", "USD", "JPY", "EUR", "CNY", "GBP"] and c_base in ["USD", "JPY", "EUR", "CNY", "GBP"]:
+                yf_code = f"{c_base}{c_quote}=X"
+            else:
+                # 암호화폐인 경우 BTC/USD -> BTC-USD 변환
+                yf_code = code.replace("/", "-")
             
         try:
             ticker_obj = yf.Ticker(yf_code)
@@ -316,7 +322,6 @@ def load_and_calculate_data(code, tf, period_str):
         if df.empty:
             return df
 
-        # 일봉 -> 주봉 / 월봉 리샘플링
         if tf == "주봉":
             df = df.resample('W-FRI').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
         elif tf == "월봉":
@@ -347,7 +352,6 @@ def load_and_calculate_data(code, tf, period_str):
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
-    # 기간별 캔들 개수 슬라이싱
     if "m" not in interval:
         if period_str != "최대(All)":
             days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
@@ -390,7 +394,7 @@ try:
         drawdown = (display_df['Close'] - cummax) / cummax
         mdd = drawdown.min() * 100
 
-        m3.metric("기간 최고 / 최저", f"{high_val:,.0f} / {low_val:,.0f}" if currency_symbol=="원" else f"{high_val:,.2f} / {low_val:,.2f}", f"고점대비 {drop_from_high:+.1f}%")
+        m3.metric("기간 최고 / 최저", f"{high_val:,.0f} / {low_val:,.0f}" if (currency_symbol=="원" and category=="국내주식 (KRX)") else f"{high_val:,.2f} / {low_val:,.2f}", f"고점대비 {drop_from_high:+.1f}%")
         m4.metric("기간 내 MDD (최대 낙폭)", f"{mdd:.2f}%", delta_color="inverse")
 
         st.markdown("---")
@@ -444,8 +448,6 @@ try:
 
         with tab1:
             is_intraday = "m" in tf_config[timeframe]["interval"]
-            
-            # X축 데이터 분기 (분봉은 텍스트 연속축, 일/주/월봉은 고유 Timestamp)
             if is_intraday:
                 x_data = display_df.index.strftime('%Y-%m-%d %H:%M')
             else:
@@ -556,7 +558,6 @@ try:
                 hovermode='x unified'
             )
 
-            # 분봉일 때만 휴장 공백 제거용 범주형 축 적용 (일/주/월봉은 정상 타임라인 축 유지)
             if is_intraday:
                 fig.update_xaxes(type='category', nticks=10)
             else:
