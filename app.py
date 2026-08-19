@@ -9,9 +9,37 @@ from plotly.subplots import make_subplots
 import urllib.request
 import urllib.parse
 import json
+import re
 
 # 페이지 설정
 st.set_page_config(page_title="글로벌 종합 금융 프로 터미널", layout="wide", initial_sidebar_state="expanded")
+
+# ==================== 0. 정크 종목(거래정지/우선주/스팩/리츠/관리종목) 필터 함수 ====================
+def is_valid_normal_stock(name: str, code: str, curr_volume: float, curr_amount: float) -> bool:
+    """거래정지, 상장폐지 절차, 스팩, 리츠, 우선주, 관리종목 등을 완벽 필터링"""
+    # 1) 거래량/거래대금이 0인 거래정지 종목 즉시 제외
+    if curr_volume <= 0 or curr_amount <= 0:
+        return False
+    
+    # 2) 6자리 숫자가 아니거나 비정상 티커 제외
+    if not (str(code).isdigit() and len(str(code)) == 6):
+        return False
+        
+    name_clean = str(name).strip()
+    
+    # 3) 스팩(SPAC), 리츠(REITs), ETN, 인프라 제외
+    if any(keyword in name_clean for keyword in ["스팩", "기업인수목적", "리츠", "REIT", "인프라", "투융자"]):
+        return False
+        
+    # 4) 우선주 제외 (예: 삼성전자우, 현대차2우B 등)
+    if re.search(r'(우|우B|우C|우\(전환\))$', name_clean):
+        return False
+        
+    # 5) 관리종목, 정리매매, 감리 등 특수 표시 제외
+    if any(keyword in name_clean for keyword in ["(관리)", "(정매)", "(환기)", "정리매매"]):
+        return False
+        
+    return True
 
 # ==================== 텔레그램 메시지 발송 함수 ====================
 def send_telegram_message(message: str) -> bool:
@@ -450,7 +478,7 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
-# ==================== ⚡ 사용자 맞춤 조건 수급 돌파 스캐너 ====================
+# ==================== ⚡ 사용자 맞춤 조건 수급 돌파 스캐너 (클린 필터 적용) ====================
 @st.cache_data(ttl=300)
 def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
     try:
@@ -478,6 +506,9 @@ def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
         if amt_col is None:
             return pd.DataFrame(), scan_date
 
+        vol_col = 'Volume' if 'Volume' in df_krx.columns else None
+
+        # ⚡ 1차 필터링: 당일 거래대금 기준치 이상 유입 종목 추출
         targets = df_krx[df_krx[amt_col] >= threshold_won].copy()
 
         if targets.empty:
@@ -491,11 +522,20 @@ def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
             code = str(row['Code']).zfill(6)
             name = row['Name']
             curr_amount = row[amt_col]
+            curr_vol = row[vol_col] if vol_col else 1.0
             marcap_val = row.get('Marcap', 0)
+
+            # 🛡️ 1차 클린 필터링: 거래정지, 스팩, 리츠, 우선주, 관리종목 제외
+            if not is_valid_normal_stock(name, code, curr_vol, curr_amount):
+                continue
 
             try:
                 hist = fdr.DataReader(code, start_date)
                 if hist is not None and len(hist) >= min(10, lookback_days):
+                    # 🛡️ 최근 거래정지 이력(최근 3일 내 거래량 0) 검사
+                    if hist['Volume'].iloc[-1] <= 0:
+                        continue
+
                     if 'Amount' in hist.columns and hist['Amount'].iloc[-1] > 0:
                         amounts = hist['Amount']
                     else:
@@ -538,7 +578,7 @@ def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
     except Exception:
         return pd.DataFrame(), str(datetime.date.today())
 
-# ==================== 🧊 장기 초소외주 스캐너 ====================
+# ==================== 🧊 장기 초소외주 스캐너 (클린 필터 적용) ====================
 @st.cache_data(ttl=600)
 def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_eok):
     try:
@@ -560,6 +600,8 @@ def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_e
             df_krx['Estimated_Amount'] = df_krx['Volume'] * df_krx['Close']
             amt_col = 'Estimated_Amount'
 
+        vol_col = 'Volume' if 'Volume' in df_krx.columns else None
+
         min_marcap_won = min_marcap_eok * 100_000_000
         max_marcap_won = max_marcap_eok * 100_000_000
         
@@ -576,16 +618,26 @@ def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_e
         calendar_days = int(lookback_days * 1.8) + 30
         start_date = today - datetime.timedelta(days=calendar_days)
 
-        sample_cands = cands.sort_values(by='Marcap', ascending=False).head(120)
+        sample_cands = cands.sort_values(by='Marcap', ascending=False).head(150)
 
         for _, row in sample_cands.iterrows():
             code = str(row['Code']).zfill(6)
             name = row['Name']
             marcap_val = row.get('Marcap', 0)
+            curr_amt_krx = row[amt_col]
+            curr_vol_krx = row[vol_col] if vol_col else 1.0
+
+            # 🛡️ 1차 클린 필터링: 거래정지, 스팩, 리츠, 우선주, 관리종목 제외
+            if not is_valid_normal_stock(name, code, curr_vol_krx, curr_amt_krx):
+                continue
 
             try:
                 hist = fdr.DataReader(code, start_date)
                 if hist is not None and len(hist) >= min(60, int(lookback_days * 0.5)):
+                    # 🛡️ 최근 당일 거래정지 여부 검증
+                    if hist['Volume'].iloc[-1] <= 0:
+                        continue
+
                     if 'Amount' in hist.columns and hist['Amount'].iloc[-1] > 0:
                         amounts = hist['Amount']
                     else:
@@ -597,6 +649,7 @@ def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_e
                     avg_amt = period_amounts.mean()
                     curr_amt = period_amounts.iloc[-1]
 
+                    # 🎯 N일간 단 하루도 상한선을 넘지 않은 종목
                     if max_amt < max_cap_won:
                         curr_close = hist['Close'].iloc[-1]
                         prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else curr_close
@@ -888,6 +941,7 @@ try:
         elif active_tab == "🔥 맞춤 조건 수급 폭발 스캐너":
             # ==================== 🔥 사용자 직접 입력 + 검색 버튼 스캐너 화면 ====================
             st.markdown("### 🔥 맞춤 조건 수급 폭발 주도주 실시간 스캐너")
+            st.caption("🛡️ 거래정지, 상장폐지, 관리/환기종목, 우선주, 스팩, 리츠는 자동으로 완벽 제외됩니다.")
             
             with st.container():
                 st.markdown("##### ⚙️ 검색 조건 직접 입력")
@@ -943,7 +997,6 @@ try:
 
                 st.markdown("---")
                 
-                # 텔레그램 전체 전송 버튼 헤더
                 head_col1, head_col2 = st.columns([4, 1.2])
                 with head_col1:
                     if scan_date:
@@ -1015,7 +1068,7 @@ try:
         else:
             # ==================== 🧊 장기 초소외주 탐색기 화면 ====================
             st.markdown("### 🧊 장기 초소외주 / 품절주 전수 탐색기")
-            st.caption("지정된 기간 동안 단 하루도 기준 거래대금을 넘지 않고 시장의 관심 밖에서 극도로 소외되어 횡보/매집 중인 주식을 전수 스캔합니다.")
+            st.caption("🛡️ 거래정지, 상장폐지, 관리/환기종목, 우선주, 스팩, 리츠는 자동으로 완벽 제외됩니다.")
             
             with st.container():
                 st.markdown("##### ⚙️ 초소외주 탐색 조건")
@@ -1056,7 +1109,6 @@ try:
 
                 st.markdown("---")
                 
-                # 텔레그램 소외주 목록 전송 버튼
                 dhead_col1, dhead_col2 = st.columns([4, 1.2])
                 with dhead_col1:
                     if d_date:
