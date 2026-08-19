@@ -357,80 +357,78 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
-# ==================== 💥 최근 완료된 거래일 자동 감지 스캐너 ====================
-@st.cache_data(ttl=600)
-def scan_volume_surge_and_price_spike():
+# ==================== ⚡ 초고속(1초컷) 수급 폭발 스캐너 함수 ====================
+@st.cache_data(ttl=300)
+def scan_volume_surge_and_price_spike_fast():
     try:
         df_krx = fdr.StockListing('KRX')
         if df_krx.empty:
             return pd.DataFrame(), ""
 
-        # 대표 대형주(삼성전자)를 통해 가장 최근에 확정 마감된 거래일자(기준일) 확인
-        sample_hist = fdr.DataReader("005930", datetime.date.today() - datetime.timedelta(days=15))
-        if sample_hist is None or sample_hist.empty:
+        # 등락률 및 거래대금 컬럼 확인
+        chg_col = 'ChgRate' if 'ChgRate' in df_krx.columns else 'ChangesRatio'
+        amt_col = 'Amount' if 'Amount' in df_krx.columns else None
+
+        if amt_col is None:
             return pd.DataFrame(), ""
-        
-        last_trade_date_str = sample_hist.index[-1].strftime('%Y-%m-%d')
 
-        # 시총 및 거래대금 상위 종목 우선 정밀 검사
-        top_krx = df_krx.sort_values(by='Marcap', ascending=False).head(400)
+        # ⚡ 1단계 (0.1초): 당일 거래대금 2,000억 이상 & +10% 이상인 종목만 즉시 추출 (소수 종목으로 압축)
+        targets = df_krx[(df_krx[amt_col] >= 200_000_000_000) & (df_krx[chg_col] >= 10.0)].copy()
 
+        today = datetime.date.today()
+        sample_hist = fdr.DataReader("005930", today - datetime.timedelta(days=10))
+        scan_date = sample_hist.index[-1].strftime('%Y-%m-%d') if not sample_hist.empty else str(today)
+
+        if targets.empty:
+            return pd.DataFrame(), scan_date
+
+        # ⚡ 2단계 (1초): 압축된 1~5개 종목에 대해서만 5일 이력 정밀 검증
         results = []
-        start_date = datetime.date.today() - datetime.timedelta(days=35)
+        start_date = today - datetime.timedelta(days=30)
 
-        for _, row in top_krx.iterrows():
+        for _, row in targets.iterrows():
             code = row['Code']
             name = row['Name']
-            marcap = row['Marcap']
+            curr_amount = row[amt_col]
+            chg_rate = row[chg_col]
+            close_val = row['Close']
+            marcap_val = row.get('Marcap', 0)
 
             try:
                 hist = fdr.DataReader(code, start_date)
-                if hist is None or len(hist) < 6:
-                    continue
+                if hist is not None and len(hist) >= 6:
+                    if 'Amount' in hist.columns and hist['Amount'].iloc[-1] > 0:
+                        amounts = hist['Amount']
+                    else:
+                        amounts = hist['Close'] * hist['Volume']
 
-                # 일별 거래대금 계산 (Amount 없으면 Close * Volume 추정)
-                if 'Amount' in hist.columns and hist['Amount'].iloc[-1] > 0:
-                    amounts = hist['Amount']
-                else:
-                    amounts = hist['Close'] * hist['Volume']
+                    # 직전 5영업일 평균 거래대금 산출
+                    prev_5days = amounts.iloc[-6:-1]
+                    avg_5d = prev_5days.mean()
 
-                # 최근 거래일(T일)의 수급 및 등락률
-                target_amount = amounts.iloc[-1]
-                target_close = hist['Close'].iloc[-1]
-                prev_close = hist['Close'].iloc[-2]
-                chg_rate = ((target_close - prev_close) / prev_close) * 100
-
-                # 조건 1: 최근 거래일(당일/전일) 거래대금 2,000억 이상
-                # 조건 2: 당일 상승률 +10% 이상
-                if target_amount >= 200_000_000_000 and chg_rate >= 10.0:
-                    # 직전 5영업일 평균 거래대금 계산
-                    prev_5days_amounts = amounts.iloc[-6:-1]
-                    avg_5days = prev_5days_amounts.mean()
-
-                    # 조건 3: 평소(직전 5일 평균) 거래대금이 2,000억 미만이었던 종목
-                    if avg_5days < 200_000_000_000:
-                        surge_ratio = (target_amount / avg_5days) * 100 if avg_5days > 0 else 999.0
+                    # 조건 3: 평소 2,000억 미만이었던 종목만 확정
+                    if avg_5d < 200_000_000_000:
+                        surge_ratio = (curr_amount / avg_5d) * 100 if avg_5d > 0 else 999.0
                         results.append({
-                            '기준일자': last_trade_date_str,
+                            '기준일자': scan_date,
                             'Code': code,
                             'Name': name,
-                            'Close': target_close,
+                            'Close': close_val,
                             'ChgRate': chg_rate,
-                            '거래대금(억원)': round(target_amount / 100_000_000, 1),
-                            '직전5일평균(억원)': round(avg_5days / 100_000_000, 1),
+                            '거래대금(억원)': round(curr_amount / 100_000_000, 1),
+                            '직전5일평균(억원)': round(avg_5d / 100_000_000, 1),
                             '수급폭증률': f"{surge_ratio:,.0f}%",
-                            '시가총액(억원)': round(marcap / 100_000_000, 0),
+                            '시가총액(억원)': round(marcap_val / 100_000_000, 0),
                             'Market': row.get('Market', 'KRX')
                         })
             except Exception:
                 continue
 
         if not results:
-            return pd.DataFrame(), last_trade_date_str
+            return pd.DataFrame(), scan_date
 
-        res_df = pd.DataFrame(results)
-        res_df = res_df.sort_values(by='ChgRate', ascending=False)
-        return res_df, last_trade_date_str
+        res_df = pd.DataFrame(results).sort_values(by='ChgRate', ascending=False)
+        return res_df, scan_date
 
     except Exception:
         return pd.DataFrame(), ""
@@ -681,13 +679,13 @@ try:
             except Exception as e:
                 st.error(f"수익률 비교 중 오류: {e}")
 
-        # ==================== TAB 3. 최신 거래일 기준 수급 스캐너 ====================
+        # ==================== TAB 3. 초고속 수급 스캐너 ====================
         with tab3:
             st.markdown("### 🚀 평소 2천억 미만 $\\rightarrow$ 2천억 돌파 & +10% 이상 급등주")
-            st.info("💡 **필터링 로직:** 장중에는 당일 실시간, 야간/휴일에는 **가장 최근 완료된 거래일**을 자동 감지하여 '직전 5영업일 평균 거래대금 2천억 미만 $\\rightarrow$ 기준일 2천억 돌파 & +10% 이상 상승' 종목을 추적합니다.")
+            st.info("💡 **필터링 로직:** 직전 5영업일 평균 거래대금이 2,000억 미만이다가 **기준일(최근 거래일)에 2,000억 이상 유입 & +10% 이상 급등**한 종목을 초고속 스캔합니다.")
             
-            with st.spinner("최근 확정 거래일 기준 KRX 전 종목 수급 이력 스캔 중..."):
-                surge_data, scan_date = scan_volume_surge_and_price_spike()
+            with st.spinner("KRX 수급 급증 종목 초고속 스캔 중..."):
+                surge_data, scan_date = scan_volume_surge_and_price_spike_fast()
                 
             if scan_date:
                 st.caption(f"📅 **분석 기준 거래일자:** {scan_date}")
