@@ -198,7 +198,7 @@ if input_mode == "목록에서 선택":
     category = st.sidebar.radio(
         "🌐 자산 카테고리", 
         ["해외주식 (US Custom)", "국내주식 (KRX)", "채권 (Bonds)", "원자재 (Commodity)", "환율 (Forex)", "암호화폐 (Crypto)"], 
-        index=4
+        index=1
     )
 
     if category == "해외주식 (US Custom)":
@@ -223,7 +223,7 @@ if input_mode == "목록에서 선택":
     selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=list(STOCKS.keys()), index=0)
     selected_code = STOCKS[selected_name]
 else:
-    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: USD/KRW, GC=F, NVDA, 005930)", value="USD/KRW").strip()
+    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: 005930, NVDA, USD/KRW, GC=F)", value="005930").strip()
     selected_name = f"Custom: {direct_ticker}"
     selected_code = direct_ticker
     category = "직접입력"
@@ -241,7 +241,7 @@ tf_config = {
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⏱️ 차트 주기 & 기간")
-timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=2) # 1시간봉 기본
+timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=3)
 
 current_cfg = tf_config[timeframe]
 selected_period = st.sidebar.select_slider(
@@ -268,7 +268,7 @@ if "APP_PASSWORD" in st.secrets:
         st.session_state["authenticated"] = False
         st.rerun()
 
-# ==================== 데이터 및 지표 계산 (환율/코인 분봉 티커 자동 변환) ====================
+# ==================== 데이터 및 지표 계산 함수 ====================
 period_map_yf = {
     "1일": "1d", "3일": "3d", "5일": "5d", "1달": "1mo", "1개월": "1mo", 
     "2개월": "2mo", "6개월": "6mo", "1년": "1y", "3년": "3y", "5년": "5y", "10년": "10y", "최대(All)": "max"
@@ -279,18 +279,16 @@ def load_and_calculate_data(code, tf, period_str):
     interval = tf_config[tf]["interval"]
     yf_period = period_map_yf.get(period_str, "1y")
 
-    # 1) 분봉 조회 (5m, 30m, 60m)
+    # 1) 분봉 조회
     if "m" in interval:
         yf_code = code
         if code.isdigit() and len(code) == 6:
             yf_code = f"{code}.KS"
         elif "/" in code:
-            # 환율인 경우 USD/KRW -> USDKRW=X 변환
             c_base, c_quote = code.split("/")
             if c_quote in ["KRW", "USD", "JPY", "EUR", "CNY", "GBP"] and c_base in ["USD", "JPY", "EUR", "CNY", "GBP"]:
                 yf_code = f"{c_base}{c_quote}=X"
             else:
-                # 암호화폐인 경우 BTC/USD -> BTC-USD 변환
                 yf_code = code.replace("/", "-")
             
         try:
@@ -330,7 +328,6 @@ def load_and_calculate_data(code, tf, period_str):
     if 'Volume' not in df.columns:
         df['Volume'] = 0
 
-    # 기술적 보조지표 계산
     df['20선'] = df['Close'].rolling(20).mean()
     df['50선'] = df['Close'].rolling(50).mean()
     df['100선'] = df['Close'].rolling(100).mean()
@@ -360,6 +357,76 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
+# ==================== 💥 2,000억 미만 -> 2,000억 유입 + 10% 이상 상승 정밀 스캐너 ====================
+@st.cache_data(ttl=600)
+def scan_volume_surge_and_price_spike():
+    try:
+        df_krx = fdr.StockListing('KRX')
+        if 'Amount' not in df_krx.columns:
+            return pd.DataFrame()
+            
+        # 1차 필터링: 당일 거래대금 2,000억 원 이상 (200,000,000,000원) AND 등락률 10% 이상
+        cands = df_krx[(df_krx['Amount'] >= 200_000_000_000) & (df_krx['ChgRate'] >= 10.0)].copy()
+        
+        if cands.empty:
+            return pd.DataFrame()
+
+        results = []
+        today = datetime.date.today()
+        start_date = today - datetime.timedelta(days=30) # 최근 과거 데이터 조회
+
+        for _, row in cands.iterrows():
+            code = row['Code']
+            name = row['Name']
+            curr_amount = row['Amount']
+            chg_rate = row['ChgRate']
+            close_price = row['Close']
+            marcap = row['Marcap']
+
+            try:
+                hist = fdr.DataReader(code, start_date)
+                if hist is None or len(hist) < 6:
+                    continue
+                
+                # 과거 일별 거래대금 계산 (종가 * 거래량 또는 시고저종 평균 * 거래량)
+                # 'Amount' 컬럼이 있는 경우 사용, 없으면 Close * Volume 추정
+                if 'Amount' in hist.columns:
+                    hist_amounts = hist['Amount']
+                else:
+                    hist_amounts = hist['Close'] * hist['Volume']
+
+                # 직전 5영업일(당일 제외) 평균 거래대금 산출
+                prev_5days_amount = hist_amounts.iloc[-6:-1]
+                avg_5days = prev_5days_amount.mean()
+
+                # 조건: 평소(직전 5일 평균) 거래대금이 2,000억 미만이었던 종목만 통과!
+                if avg_5days < 200_000_000_000:
+                    surge_ratio = (curr_amount / avg_5days) * 100 if avg_5days > 0 else 999.0
+                    results.append({
+                        'Code': code,
+                        'Name': name,
+                        'Close': close_price,
+                        'ChgRate': chg_rate,
+                        '당일거래대금(억원)': round(curr_amount / 100_000_000, 1),
+                        '직전5일평균(억원)': round(avg_5days / 100_000_000, 1),
+                        '거래대금폭증률': f"{surge_ratio:,.0f}%",
+                        '시가총액(억원)': round(marcap / 100_000_000, 0),
+                        'Market': row.get('Market', 'KRX')
+                    })
+            except Exception:
+                continue
+
+        if not results:
+            return pd.DataFrame()
+
+        res_df = pd.DataFrame(results)
+        res_df = res_df.sort_values(by='ChgRate', ascending=False) # 등락률 높은 순 정렬
+        return res_df
+
+    except Exception:
+        return pd.DataFrame()
+
+# ==================== 본문 렌더링 ====================
 try:
     display_df = load_and_calculate_data(selected_code, timeframe, selected_period)
     
@@ -444,7 +511,7 @@ try:
             sig_col4.markdown("MACD Hist: -", unsafe_allow_html=True)
 
         st.markdown("---")
-        tab1, tab2 = st.tabs(["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교"])
+        tab1, tab2, tab3 = st.tabs(["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교", "🚀 수급 대폭발 급등주 (+10% & 2천억돌파)"])
 
         with tab1:
             is_intraday = "m" in tf_config[timeframe]["interval"]
@@ -529,7 +596,7 @@ try:
                     row=current_row, col=1
                 )
                 fig.add_trace(
-                    go.Scatter(x=x_data, y=display_df['MACD_Signal'], mode='lines', name='Signal', line=dict(color='#FF7043', width=1.3)),
+                    go.Scatter(x=display_df.index if not is_intraday else x_data, y=display_df['MACD_Signal'], mode='lines', name='Signal', line=dict(color='#FF7043', width=1.3)),
                     row=current_row, col=1
                 )
                 hist_colors = ['#26A69A' if v >= 0 else '#EF5350' for v in display_df['MACD_Hist']]
@@ -604,6 +671,31 @@ try:
                     st.warning("비교 대상 데이터를 가져올 수 없습니다.")
             except Exception as e:
                 st.error(f"수익률 비교 중 오류: {e}")
+
+        # ==================== TAB 3. 2,000억 미만 -> 2,000억 이상 유입 & +10% 급등 스캐너 ====================
+        with tab3:
+            st.markdown("### 🚀 평소 2천억 미만 $\\rightarrow$ 당일 2천억 돌파 & +10% 이상 급등주")
+            st.info("💡 **필터링 조건:** 평소(직전 5일 평균) 거래대금이 2,000억 미만으로 조용하다가, **당일 2,000억 원 이상의 메가 수급이 터지며 주가가 +10% 이상 급등**한 당일 시장 주도주만 포착합니다.")
+            
+            with st.spinner("KRX 전 종목 5일 수급 이력 정밀 추적 중..."):
+                surge_data = scan_volume_surge_and_price_spike()
+                
+            if not surge_data.empty:
+                st.success(f"총 **{len(surge_data)}개 종목**이 포착되었습니다!")
+                
+                st.dataframe(
+                    surge_data.style.format({
+                        'Close': '{:,.0f}원',
+                        'ChgRate': '{:+.2f}%',
+                        '당일거래대금(억원)': '{:,.1f} 억',
+                        '직전5일평균(억원)': '{:,.1f} 억',
+                        '시가총액(억원)': '{:,.0f} 억'
+                    }),
+                    use_container_width=True,
+                    height=450
+                )
+            else:
+                st.warning("현재 기준 '평소 2천억 미만 $\\rightarrow$ 당일 2천억 돌파 및 +10% 이상 급등' 조건을 만족하는 종목이 없습니다. (장 시작 전이거나 시장 휴장일일 수 있습니다)")
 
 except Exception as e:
     st.error(f"데이터 조회 중 예기치 않은 오류가 발생했습니다: {e}")
