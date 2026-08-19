@@ -10,6 +10,19 @@ from plotly.subplots import make_subplots
 # 페이지 설정
 st.set_page_config(page_title="글로벌 종합 금융 프로 터미널", layout="wide", initial_sidebar_state="expanded")
 
+# ==================== 세션 상태 초기화 & 콜백 함수 ====================
+if "category_radio" not in st.session_state:
+    st.session_state["category_radio"] = "국내주식 (KRX)"
+if "custom_stock_name" not in st.session_state:
+    st.session_state["custom_stock_name"] = None
+if "custom_stock_code" not in st.session_state:
+    st.session_state["custom_stock_code"] = None
+
+def select_scanner_stock(name, code):
+    st.session_state["category_radio"] = "국내주식 (KRX)"
+    st.session_state["custom_stock_name"] = name
+    st.session_state["custom_stock_code"] = code
+
 # ==================== 1. 비공개 접속 비밀번호 인증 ====================
 def check_password():
     if st.session_state.get("authenticated", False):
@@ -194,19 +207,13 @@ st.sidebar.header("🕹️ 컨트롤 패널")
 
 input_mode = st.sidebar.radio("🔍 종목 선택 방식", ["목록에서 선택", "티커 직접 입력"], index=0)
 
-# 세션 상태 기본값 처리
-if "selected_category" not in st.session_state:
-    st.session_state["selected_category"] = "국내주식 (KRX)"
-
 if input_mode == "목록에서 선택":
     category_list = ["해외주식 (US Custom)", "국내주식 (KRX)", "채권 (Bonds)", "원자재 (Commodity)", "환율 (Forex)", "암호화폐 (Crypto)"]
-    cat_idx = category_list.index(st.session_state.get("selected_category", "국내주식 (KRX)")) if st.session_state.get("selected_category") in category_list else 1
     
     category = st.sidebar.radio(
         "🌐 자산 카테고리", 
         category_list, 
-        index=cat_idx,
-        key="selected_category"
+        key="category_radio"
     )
 
     if category == "해외주식 (US Custom)":
@@ -214,8 +221,7 @@ if input_mode == "목록에서 선택":
         currency_symbol = "USD"
     elif category == "국내주식 (KRX)":
         STOCKS = get_krx_stocks()
-        # 스캐너에서 선택된 종목이 기존 상위 목록에 없으면 동적 추가
-        if "custom_stock_name" in st.session_state and "custom_stock_code" in st.session_state:
+        if st.session_state["custom_stock_name"] and st.session_state["custom_stock_code"]:
             c_name = st.session_state["custom_stock_name"]
             c_code = st.session_state["custom_stock_code"]
             if c_name not in STOCKS:
@@ -234,10 +240,9 @@ if input_mode == "목록에서 선택":
         STOCKS = get_crypto()
         currency_symbol = "USD"
 
-    # 스캐너에서 선택된 종목이 있는 경우 기본 선택값으로 동기화
     options_list = list(STOCKS.keys())
-    default_name = st.session_state.get("custom_stock_name", options_list[0])
-    selected_idx = options_list.index(default_name) if default_name in options_list else 0
+    default_target = st.session_state.get("custom_stock_name")
+    selected_idx = options_list.index(default_target) if (default_target and default_target in options_list) else 0
 
     selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=options_list, index=selected_idx)
     selected_code = STOCKS[selected_name]
@@ -410,7 +415,6 @@ def scan_volume_surge_stocks_fast():
         if amt_col is None:
             return pd.DataFrame(), scan_date
 
-        # 당일 거래대금 2,000억 이상
         targets = df_krx[df_krx[amt_col] >= 200_000_000_000].copy()
 
         if targets.empty:
@@ -710,7 +714,7 @@ try:
             except Exception as e:
                 st.error(f"수익률 비교 중 오류: {e}")
 
-        # ==================== TAB 3. 2천억 첫 수급 폭발 스캐너 (클릭 즉시 차트 연동) ====================
+        # ==================== TAB 3. 2천억 첫 수급 폭발 스캐너 (콜백 방식 원클릭 연동) ====================
         with tab3:
             st.markdown("### 🔥 평소 2천억 미만 $\\rightarrow$ 당일 2천억 이상 메가 수급 폭발주")
             st.info("💡 **원클릭 차트 이동:** 아래 포착된 종목의 **`[📊 차트 보기]`** 버튼을 클릭하면 사이드바 목록에 자동 추가되며 해당 종목의 캔들 차트로 즉시 전환됩니다.")
@@ -724,7 +728,6 @@ try:
             if not surge_data.empty:
                 st.success(f"기준일({scan_date})에 평소 대비 2,000억 이상 수급이 터진 종목 **{len(surge_data)}개**가 포착되었습니다!")
                 
-                # 인터랙티브 버튼 카드 목록 렌더링
                 for idx, r in surge_data.iterrows():
                     c_code = r['Code']
                     c_name = r['Name']
@@ -745,14 +748,16 @@ try:
                                 unsafe_allow_html=True
                             )
                         with col_btn:
-                            if st.button("📊 차트 보기", key=f"btn_{c_code}", use_container_width=True):
-                                st.session_state["selected_category"] = "국내주식 (KRX)"
-                                st.session_state["custom_stock_name"] = c_name
-                                st.session_state["custom_stock_code"] = c_code
-                                st.rerun()
+                            st.button(
+                                "📊 차트 보기", 
+                                key=f"btn_{c_code}", 
+                                on_click=select_scanner_stock, 
+                                args=(c_name, c_code), 
+                                use_container_width=True
+                            )
                         st.markdown("---")
 
-                # 전체 데이터프레임 뷰
+                # 데이터프레임 뷰
                 st.dataframe(
                     surge_data.style.format({
                         'Close': '{:,.0f}원',
