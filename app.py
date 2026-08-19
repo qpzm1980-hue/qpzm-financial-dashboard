@@ -17,14 +17,14 @@ if "custom_stock_name" not in st.session_state:
     st.session_state["custom_stock_name"] = None
 if "custom_stock_code" not in st.session_state:
     st.session_state["custom_stock_code"] = None
-if "active_tab_index" not in st.session_state:
-    st.session_state["active_tab_index"] = 0
+if "tab_selector" not in st.session_state:
+    st.session_state["tab_selector"] = "📊 인터랙티브 종합 차트"
 
 def select_scanner_stock(name, code):
     st.session_state["category_radio"] = "국내주식 (KRX)"
     st.session_state["custom_stock_name"] = name
     st.session_state["custom_stock_code"] = code
-    st.session_state["active_tab_index"] = 0  # 첫 번째 시트(인터랙티브 차트)로 즉시 전환
+    st.session_state["tab_selector"] = "📊 인터랙티브 종합 차트"  # 첫 번째 탭으로 즉시 강제 전환
 
 # ==================== 1. 비공개 접속 비밀번호 인증 ====================
 def check_password():
@@ -430,7 +430,6 @@ def scan_volume_surge_stocks_100b():
         if amt_col is None:
             return pd.DataFrame(), scan_date
 
-        # 당일 1,000억 이상 유입된 종목 1차 추출 (100,000,000,000원)
         targets = df_krx[df_krx[amt_col] >= 100_000_000_000].copy()
 
         if targets.empty:
@@ -456,13 +455,10 @@ def scan_volume_surge_stocks_100b():
                         amounts = hist['Close'] * hist['Volume']
 
                     prev_5days = amounts.iloc[-6:-1]
-                    max_5d = prev_5days.max()           # 직전 5일간 일간 최대 거래대금
-                    avg_5d = prev_5days.mean()          # 직전 5일 평균 거래대금
-                    yesterday_amt = prev_5days.iloc[-1] # 바로 어제 거래대금
+                    max_5d = prev_5days.max()
+                    avg_5d = prev_5days.mean()
+                    yesterday_amt = prev_5days.iloc[-1]
 
-                    # 🎯 1천억 정밀 조건:
-                    # 1) 직전 5영업일 중 단 하루도 1,000억을 넘긴 적이 없음 (잠복기 후 첫 돌파)
-                    # 2) 당일 거래대금이 어제 거래대금보다 큼 (수급 증가)
                     if max_5d < 100_000_000_000 and curr_amount > yesterday_amt:
                         surge_ratio = (curr_amount / avg_5d) * 100 if avg_5d > 0 else 999.0
                         results.append({
@@ -578,15 +574,14 @@ try:
         
         tab_titles = ["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교", "🔥 1천억 첫 수급 폭발주"]
         
+        # 세션 상태 key="tab_selector"와 직접 바인딩
         active_tab = st.radio(
             "탭 선택",
             tab_titles,
-            index=st.session_state.get("active_tab_index", 0),
             horizontal=True,
             label_visibility="collapsed",
             key="tab_selector"
         )
-        st.session_state["active_tab_index"] = tab_titles.index(active_tab)
 
         if active_tab == "📊 인터랙티브 종합 차트":
             is_intraday = "m" in tf_config[timeframe]["interval"]
