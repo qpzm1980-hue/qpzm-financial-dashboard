@@ -20,11 +20,19 @@ if "custom_stock_code" not in st.session_state:
 if "tab_selector" not in st.session_state:
     st.session_state["tab_selector"] = "📊 인터랙티브 종합 차트"
 
+# 스캐너 결과 저장용 세션 상태
+if "scan_results_df" not in st.session_state:
+    st.session_state["scan_results_df"] = None
+if "scan_results_date" not in st.session_state:
+    st.session_state["scan_results_date"] = None
+if "last_scanned_params" not in st.session_state:
+    st.session_state["last_scanned_params"] = None
+
 def select_scanner_stock(name, code):
     st.session_state["category_radio"] = "국내주식 (KRX)"
     st.session_state["custom_stock_name"] = name
     st.session_state["custom_stock_code"] = code
-    st.session_state["tab_selector"] = "📊 인터랙티브 종합 차트"
+    st.session_state["tab_selector"] = "📊 인터랙티브 종합 차트"  # 첫 번째 탭으로 즉시 강제 전환
 
 # ==================== 1. 비공개 접속 비밀번호 인증 ====================
 def check_password():
@@ -396,9 +404,9 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
-# ==================== ⚡ 100일 기준 정밀 첫 수급 돌파 스캐너 ====================
+# ==================== ⚡ 사용자 맞춤 조건 수급 돌파 스캐너 함수 ====================
 @st.cache_data(ttl=300)
-def scan_volume_surge_stocks_100d():
+def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
     try:
         today = datetime.date.today()
         sample_hist = fdr.DataReader("005930", today - datetime.timedelta(days=15))
@@ -424,15 +432,15 @@ def scan_volume_surge_stocks_100d():
         if amt_col is None:
             return pd.DataFrame(), scan_date
 
-        # 당일 500억 이상 유입된 종목 1차 추출
-        targets = df_krx[df_krx[amt_col] >= 50_000_000_000].copy()
+        # ⚡ 1차 필터링: 당일 거래대금 기준치 이상 유입 종목 추출
+        targets = df_krx[df_krx[amt_col] >= threshold_won].copy()
 
         if targets.empty:
             return pd.DataFrame(), scan_date
 
         results = []
-        # 100거래일 이력 조회를 위해 180일 전부터 데이터 조회
-        start_date = today - datetime.timedelta(days=180)
+        calendar_days = int(lookback_days * 1.8) + 25
+        start_date = today - datetime.timedelta(days=calendar_days)
 
         for _, row in targets.iterrows():
             code = str(row['Code']).zfill(6)
@@ -442,41 +450,41 @@ def scan_volume_surge_stocks_100d():
 
             try:
                 hist = fdr.DataReader(code, start_date)
-                # 최근 100거래일 이상 확보
-                if hist is not None and len(hist) >= 30:
+                if hist is not None and len(hist) >= min(10, lookback_days):
                     if 'Amount' in hist.columns and hist['Amount'].iloc[-1] > 0:
                         amounts = hist['Amount']
                     else:
                         amounts = hist['Close'] * hist['Volume']
 
-                    # 직전 최대 100영업일 슬라이싱 (당일 제외)
-                    lookback_len = min(100, len(amounts) - 1)
-                    prev_100days = amounts.iloc[-(lookback_len + 1):-1]
-                    max_100d = prev_100days.max()
-                    avg_100d = prev_100days.mean()
-                    yesterday_amt = prev_100days.iloc[-1]
+                    # 직전 N영업일 슬라이싱 (당일 제외)
+                    actual_lookback = min(lookback_days, len(amounts) - 1)
+                    prev_period_amounts = amounts.iloc[-(actual_lookback + 1):-1]
+                    max_period_amt = prev_period_amounts.max()
+                    avg_period_amt = prev_period_amounts.mean()
+                    yesterday_amt = prev_period_amounts.iloc[-1]
 
-                    # 🎯 100일 기준 정밀 조건:
-                    # 1) 직전 100영업일 동안 단 하루도 500억을 넘긴 적이 없음 (5개월 만의 첫 메가 수급)
+                    # 🎯 사용자 조건:
+                    # 1) 직전 N영업일 동안 단 하루도 기준금액을 넘긴 적이 없음
                     # 2) 당일 거래대금이 어제 거래대금보다 큼
-                    if max_100d < 50_000_000_000 and curr_amount > yesterday_amt:
+                    if max_period_amt < threshold_won and curr_amount > yesterday_amt:
                         curr_close = hist['Close'].iloc[-1]
                         prev_close = hist['Close'].iloc[-2]
                         real_chg_rate = ((curr_close - prev_close) / prev_close) * 100 if prev_close != 0 else 0.0
 
-                        surge_ratio = (curr_amount / avg_100d) * 100 if avg_100d > 0 else 999.0
-                        results.append({
-                            'Code': code,
-                            'Name': name,
-                            'Close': curr_close,
-                            'ChgRate': real_chg_rate,
-                            '당일거래대금(억원)': round(curr_amount / 100_000_000, 1),
-                            '어제거래대금(억원)': round(yesterday_amt / 100_000_000, 1),
-                            '100일평균(억원)': round(avg_100d / 100_000_000, 1),
-                            '수급폭증률': round(surge_ratio, 0),
-                            '시가총액(억원)': round(marcap_val / 100_000_000, 0),
-                            'Market': row.get('Market', 'KRX')
-                        })
+                        if real_chg_rate >= min_chg_rate:
+                            surge_ratio = (curr_amount / avg_period_amt) * 100 if avg_period_amt > 0 else 999.0
+                            results.append({
+                                'Code': code,
+                                'Name': name,
+                                'Close': curr_close,
+                                'ChgRate': real_chg_rate,
+                                '당일거래대금(억원)': round(curr_amount / 100_000_000, 1),
+                                '어제거래대금(억원)': round(yesterday_amt / 100_000_000, 1),
+                                f'{lookback_days}일평균(억원)': round(avg_period_amt / 100_000_000, 1),
+                                '수급폭증률': round(surge_ratio, 0),
+                                '시가총액(억원)': round(marcap_val / 100_000_000, 0),
+                                'Market': row.get('Market', 'KRX')
+                            })
             except Exception:
                 continue
 
@@ -575,7 +583,7 @@ try:
 
         st.markdown("---")
         
-        tab_titles = ["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교", "🔥 100일 만의 500억 첫 수급 폭발주"]
+        tab_titles = ["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교", "🔥 맞춤 조건 수급 폭발 스캐너"]
         
         active_tab = st.radio(
             "탭 선택",
@@ -745,68 +753,122 @@ try:
                 st.error(f"수익률 비교 중 오류: {e}")
 
         else:
-            # 🔥 100일 만의 500억 첫 수급 폭발주 스캐너
-            st.markdown("### 🔥 직전 100영업일간 500억 미만 $\\rightarrow$ 당일 500억 이상 첫 수급 폭발주")
-            st.info("💡 **100일 정밀 조건:** 최근 약 5개월(100거래일) 동안 **단 하루도 500억을 넘긴 적이 없다가**, 당일 처음으로 500억 원 돌파 및 **직전 거래일 대비 거래대금이 증가한 진짜 바닥 탈출 주도주**만 포착합니다.")
+            # ==================== 🔥 사용자 직접 입력 + 검색 버튼 스캐너 화면 ====================
+            st.markdown("### 🔥 맞춤 조건 수급 폭발 주도주 실시간 스캐너")
             
-            with st.spinner("KRX 100일 기준 수급 첫 돌파 종목 탐색 중..."):
-                surge_data, scan_date = scan_volume_surge_stocks_100d()
+            # 🎛️ 직접 숫자 입력 및 검색 버튼 폼
+            with st.container():
+                st.markdown("##### ⚙️ 검색 조건 직접 입력")
+                p_col1, p_col2, p_col3, p_col4 = st.columns([1.2, 1.2, 1.0, 1.0])
                 
-            if scan_date:
-                st.caption(f"📅 **분석 기준 거래일자:** `{scan_date}`")
+                with p_col1:
+                    input_lookback = st.number_input(
+                        "📅 과거 잠복 거래일수",
+                        min_value=1,
+                        max_value=365,
+                        value=20,
+                        step=5,
+                        help="지정된 일수 동안 기준금액을 한 번도 넘긴 적이 없어야 합니다."
+                    )
+                with p_col2:
+                    input_threshold_eok = st.number_input(
+                        "💰 돌파 거래대금 (억원 단위)",
+                        min_value=10,
+                        max_value=10000,
+                        value=500,
+                        step=50,
+                        help="당일 처음으로 이 금액 이상 터진 종목을 검색합니다."
+                    )
+                with p_col3:
+                    input_min_chg = st.selectbox(
+                        "📈 최소 당일 상승률",
+                        options=[0.0, 3.0, 5.0, 7.0, 10.0, 15.0],
+                        index=0,
+                        format_func=lambda x: "전체 (제한없음)" if x == 0.0 else f"+{x:.0f}% 이상 상승"
+                    )
+                with p_col4:
+                    st.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+                    run_search = st.button("🔍 조건 검색 실행", type="primary", use_container_width=True)
 
-            if not surge_data.empty:
-                st.success(f"기준일({scan_date})에 최근 100일 중 처음으로 500억 수급을 돌파한 종목 **{len(surge_data)}개**가 포착되었습니다!")
-                
-                # 상단 전체 테이블 표시
-                st.dataframe(
-                    surge_data.style.format({
-                        'Close': '{:,.0f}원',
-                        'ChgRate': '{:+.2f}%',
-                        '당일거래대금(억원)': '{:,.1f} 억',
-                        '어제거래대금(억원)': '{:,.1f} 억',
-                        '100일평균(억원)': '{:,.1f} 억',
-                        '수급폭증률': '{:,.0f}%',
-                        '시가총액(억원)': '{:,.0f} 억'
-                    }),
-                    use_container_width=True
-                )
-                
+            threshold_won_val = input_threshold_eok * 100_000_000
+            
+            # 검색 버튼 클릭 시 스캔 실행 및 세션 저장
+            if run_search:
+                with st.spinner(f"KRX 전 종목 대상 {input_lookback}일 잠복 / {input_threshold_eok:,}억 돌파 종목 초고속 스캔 중..."):
+                    res_df, s_date = scan_custom_volume_surge(input_lookback, threshold_won_val, input_min_chg)
+                    st.session_state["scan_results_df"] = res_df
+                    st.session_state["scan_results_date"] = s_date
+                    st.session_state["last_scanned_params"] = {
+                        "lookback": input_lookback,
+                        "threshold": input_threshold_eok,
+                        "min_chg": input_min_chg
+                    }
+
+            # 검색 결과 렌더링
+            if st.session_state["scan_results_df"] is not None:
+                surge_data = st.session_state["scan_results_df"]
+                scan_date = st.session_state["scan_results_date"]
+                p = st.session_state["last_scanned_params"]
+                avg_col_name = f'{p["lookback"]}일평균(억원)'
+
                 st.markdown("---")
-                st.markdown("#### 🎯 종목별 상세 보기 및 원클릭 차트 이동")
-                
-                # 하단 개별 바로가기 카드
-                for idx, r in surge_data.iterrows():
-                    c_code = r['Code']
-                    c_name = r['Name']
-                    c_close = r['Close']
-                    c_chg = r['ChgRate']
-                    c_amt = r['당일거래대금(억원)']
-                    c_yest_amt = r['어제거래대금(억원)']
-                    c_prev_amt = r['100일평균(억원)']
-                    c_surge = r['수급폭증률']
-                    c_marcap = r['시가총액(억원)']
+                if scan_date:
+                    st.caption(f"📅 **분석 기준 거래일자:** `{scan_date}` | **적용 조건:** 직전 `{p['lookback']}일`간 `{p['threshold']:,}억` 미만 $\\rightarrow$ 당일 `{p['threshold']:,}억` 첫 돌파")
+
+                if not surge_data.empty:
+                    st.success(f"조건을 만족한 주도주 **{len(surge_data)}개**가 포착되었습니다!")
                     
-                    with st.container():
-                        col_info, col_btn = st.columns([5, 1])
-                        with col_info:
-                            st.markdown(
-                                f"**{c_name}** (`{c_code}`) | **종가:** {c_close:,.0f}원 ({c_chg:+.2f}%) | "
-                                f"**당일 거래대금:** <span style='color:#FF9800; font-weight:bold;'>{c_amt:,.1f} 억원</span> (어제: {c_yest_amt:,.1f}억) | "
-                                f"**100일 평균:** {c_prev_amt:,.1f} 억원 (폭증률: **{c_surge:,.0f}%**) | **시총:** {c_marcap:,.0f} 억원",
-                                unsafe_allow_html=True
-                            )
-                        with col_btn:
-                            st.button(
-                                "📊 차트 보기", 
-                                key=f"btn_{c_code}", 
-                                on_click=select_scanner_stock, 
-                                args=(c_name, c_code), 
-                                use_container_width=True
-                            )
-                        st.markdown("---")
+                    # 1. 상단 전체 데이터프레임 (기준일자 제외, 높이 제한 없이 전체 출력)
+                    st.dataframe(
+                        surge_data.style.format({
+                            'Close': '{:,.0f}원',
+                            'ChgRate': '{:+.2f}%',
+                            '당일거래대금(억원)': '{:,.1f} 억',
+                            '어제거래대금(억원)': '{:,.1f} 억',
+                            avg_col_name: '{:,.1f} 억' if avg_col_name in surge_data.columns else '{:,.1f}',
+                            '수급폭증률': '{:,.0f}%',
+                            '시가총액(억원)': '{:,.0f} 억'
+                        }),
+                        use_container_width=True
+                    )
+                    
+                    st.markdown("---")
+                    st.markdown("#### 🎯 종목별 상세 보기 및 원클릭 차트 이동")
+                    
+                    # 2. 하단 개별 바로가기 카드
+                    for idx, r in surge_data.iterrows():
+                        c_code = r['Code']
+                        c_name = r['Name']
+                        c_close = r['Close']
+                        c_chg = r['ChgRate']
+                        c_amt = r['당일거래대금(억원)']
+                        c_yest_amt = r['어제거래대금(억원)']
+                        c_prev_amt = r[avg_col_name] if avg_col_name in r else 0.0
+                        c_surge = r['수급폭증률']
+                        c_marcap = r['시가총액(억원)']
+                        
+                        with st.container():
+                            col_info, col_btn = st.columns([5, 1])
+                            with col_info:
+                                st.markdown(
+                                    f"**{c_name}** (`{c_code}`) | **종가:** {c_close:,.0f}원 ({c_chg:+.2f}%) | "
+                                    f"**당일 거래대금:** <span style='color:#FF9800; font-weight:bold;'>{c_amt:,.1f} 억원</span> (어제: {c_yest_amt:,.1f}억) | "
+                                    f"**{p['lookback']}일 평균:** {c_prev_amt:,.1f} 억원 (폭증률: **{c_surge:,.0f}%**) | **시총:** {c_marcap:,.0f} 억원",
+                                    unsafe_allow_html=True
+                                )
+                            with col_btn:
+                                st.button(
+                                    "📊 차트 보기", 
+                                    key=f"btn_{c_code}", 
+                                    on_click=select_scanner_stock, 
+                                    args=(c_name, c_code), 
+                                    use_container_width=True
+                                )
+                            st.markdown("---")
+                else:
+                    st.warning(f"기준일({scan_date})에 직전 {p['lookback']}일간 {p['threshold']:,}억 미만 $\\rightarrow$ 당일 {p['threshold']:,}억 첫 돌파 조건을 만족하는 종목이 없습니다. 조건을 조정한 후 다시 검색해 보세요.")
             else:
-                st.warning(f"기준일({scan_date})에 '직전 100일간 500억 미만 유지 $\\rightarrow$ 당일 500억 첫 돌파' 조건을 만족하는 종목이 없습니다.")
+                st.info("💡 원하는 **과거 잠복 거래일수**와 **돌파 거래대금(억원)**을 입력한 후 **[🔍 조건 검색 실행]** 버튼을 눌러주세요.")
 
 except Exception as e:
     st.error(f"데이터 조회 중 예기치 않은 오류가 발생했습니다: {e}")
