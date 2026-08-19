@@ -303,28 +303,41 @@ def load_and_calculate_data(code, tf, period_str):
     interval = tf_config[tf]["interval"]
     yf_period = period_map_yf.get(period_str, "1y")
 
-    # 1) 분봉 조회
+    # 1) 분봉 조회 (코스피 .KS / 코스닥 .KQ 자동 교차 검색)
     if "m" in interval:
-        yf_code = code
+        df = pd.DataFrame()
         if code.isdigit() and len(code) == 6:
-            yf_code = f"{code}.KS"
+            # 코스피(.KS) 시도 후 비어있으면 코스닥(.KQ) 시도
+            for suffix in [".KS", ".KQ"]:
+                try:
+                    ticker_obj = yf.Ticker(f"{code}{suffix}")
+                    temp_df = ticker_obj.history(period=yf_period, interval=interval)
+                    if not temp_df.empty:
+                        df = temp_df
+                        break
+                except Exception:
+                    continue
         elif "/" in code:
             c_base, c_quote = code.split("/")
             if c_quote in ["KRW", "USD", "JPY", "EUR", "CNY", "GBP"] and c_base in ["USD", "JPY", "EUR", "CNY", "GBP"]:
                 yf_code = f"{c_base}{c_quote}=X"
             else:
                 yf_code = code.replace("/", "-")
-            
-        try:
-            ticker_obj = yf.Ticker(yf_code)
-            df = ticker_obj.history(period=yf_period, interval=interval)
-            if not df.empty:
-                df.index = df.index.tz_localize(None)
-        except Exception:
-            df = pd.DataFrame()
+            try:
+                df = yf.Ticker(yf_code).history(period=yf_period, interval=interval)
+            except Exception:
+                df = pd.DataFrame()
+        else:
+            try:
+                df = yf.Ticker(code).history(period=yf_period, interval=interval)
+            except Exception:
+                df = pd.DataFrame()
             
         if df.empty:
             return df
+        
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
     else:
         # 2) 일봉 / 주봉 / 월봉 조회
         today = datetime.date.today()
