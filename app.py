@@ -17,11 +17,14 @@ if "custom_stock_name" not in st.session_state:
     st.session_state["custom_stock_name"] = None
 if "custom_stock_code" not in st.session_state:
     st.session_state["custom_stock_code"] = None
+if "active_tab_index" not in st.session_state:
+    st.session_state["active_tab_index"] = 0
 
 def select_scanner_stock(name, code):
     st.session_state["category_radio"] = "국내주식 (KRX)"
     st.session_state["custom_stock_name"] = name
     st.session_state["custom_stock_code"] = code
+    st.session_state["active_tab_index"] = 0  # 첫 번째 시트(인터랙티브 차트)로 즉시 전환
 
 # ==================== 1. 비공개 접속 비밀번호 인증 ====================
 def check_password():
@@ -307,7 +310,6 @@ def load_and_calculate_data(code, tf, period_str):
     if "m" in interval:
         df = pd.DataFrame()
         if code.isdigit() and len(code) == 6:
-            # 코스피(.KS) 시도 후 비어있으면 코스닥(.KQ) 시도
             for suffix in [".KS", ".KQ"]:
                 try:
                     ticker_obj = yf.Ticker(f"{code}{suffix}")
@@ -566,9 +568,22 @@ try:
             sig_col4.markdown("MACD Hist: -", unsafe_allow_html=True)
 
         st.markdown("---")
-        tab1, tab2, tab3 = st.tabs(["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교", "🔥 2천억 이상 수급 폭발주 (평소 2천억 미만)"])
+        
+        # ==================== 탭 선택 라디오 버튼 (프로그램 제어 가능) ====================
+        tab_titles = ["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교", "🔥 2천억 이상 수급 폭발주 (평소 2천억 미만)"]
+        
+        active_tab = st.radio(
+            "탭 선택",
+            tab_titles,
+            index=st.session_state.get("active_tab_index", 0),
+            horizontal=True,
+            label_visibility="collapsed",
+            key="tab_selector"
+        )
+        # 사용자가 직접 상단 탭을 눌렀을 때의 index 동기화
+        st.session_state["active_tab_index"] = tab_titles.index(active_tab)
 
-        with tab1:
+        if active_tab == "📊 인터랙티브 종합 차트":
             is_intraday = "m" in tf_config[timeframe]["interval"]
             if is_intraday:
                 x_data = display_df.index.strftime('%Y-%m-%d %H:%M')
@@ -687,7 +702,7 @@ try:
 
             st.plotly_chart(fig, use_container_width=True)
 
-        with tab2:
+        elif active_tab == "📈 벤치마크 상대 수익률(%) 비교":
             st.markdown("#### 📊 타 자산 및 주요 지수와의 누적 수익률(%) 비교")
             comp_targets = {
                 "S&P 500 지수 (미국 대형주)": "US500",
@@ -727,10 +742,10 @@ try:
             except Exception as e:
                 st.error(f"수익률 비교 중 오류: {e}")
 
-        # ==================== TAB 3. 2천억 첫 수급 폭발 스캐너 (콜백 방식 원클릭 연동) ====================
-        with tab3:
+        else:
+            # 🔥 2천억 이상 수급 폭발주 스캐너 화면
             st.markdown("### 🔥 평소 2천억 미만 $\\rightarrow$ 당일 2천억 이상 메가 수급 폭발주")
-            st.info("💡 **원클릭 차트 이동:** 아래 포착된 종목의 **`[📊 차트 보기]`** 버튼을 클릭하면 사이드바 목록에 자동 추가되며 해당 종목의 캔들 차트로 즉시 전환됩니다.")
+            st.info("💡 **원클릭 차트 이동:** 아래 포착된 종목의 **`[📊 차트 보기]`** 버튼을 클릭하면 사이드바 목록에 자동 추가되며 해당 종목의 캔들 차트(첫 번째 탭)로 즉시 화면이 이동합니다.")
             
             with st.spinner("KRX 수급 급증 종목 초고속 스캔 중..."):
                 surge_data, scan_date = scan_volume_surge_stocks_fast()
