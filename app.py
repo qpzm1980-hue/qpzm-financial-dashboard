@@ -229,19 +229,19 @@ else:
     category = "직접입력"
     currency_symbol = "원" if (direct_ticker.isdigit() or "KRW" in direct_ticker) else "USD"
 
-# 주기 설정 및 매핑
+# 주기 설정 및 요청하신 기본 조회기간 매핑 적용
 tf_config = {
-    "5분봉": {"default": "5일", "options": ["1일", "5일", "1개월", "2개월"], "interval": "5m"},
-    "30분봉": {"default": "1개월", "options": ["5일", "1개월", "2개월"], "interval": "30m"},
+    "5분봉": {"default": "1일", "options": ["1일", "3일", "5일", "1개월", "2개월"], "interval": "5m"},
+    "30분봉": {"default": "5일", "options": ["5일", "1개월", "2개월"], "interval": "30m"},
     "1시간봉": {"default": "1개월", "options": ["5일", "1개월", "2개월", "6개월"], "interval": "60m"},
-    "일봉": {"default": "1년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년"], "interval": "1d"},
-    "주봉": {"default": "3년", "options": ["6개월", "1년", "3년", "5년", "10년"], "interval": "1wk"},
+    "일봉": {"default": "6개월", "options": ["1달", "6개월", "1년", "3년", "5년", "10년"], "interval": "1d"},
+    "주봉": {"default": "1년", "options": ["6개월", "1년", "3년", "5년", "10년"], "interval": "1wk"},
     "월봉": {"default": "5년", "options": ["1년", "3년", "5년", "10년"], "interval": "1mo"}
 }
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⏱️ 차트 주기 & 기간")
-timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=3)
+timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=3) # 기본값: 일봉
 
 current_cfg = tf_config[timeframe]
 selected_period = st.sidebar.select_slider(
@@ -270,7 +270,7 @@ if "APP_PASSWORD" in st.secrets:
 
 # ==================== 데이터 및 지표 계산 함수 ====================
 period_map_yf = {
-    "1일": "1d", "5일": "5d", "1달": "1mo", "1개월": "1mo", 
+    "1일": "1d", "3일": "3d", "5일": "5d", "1달": "1mo", "1개월": "1mo", 
     "2개월": "2mo", "6개월": "6mo", "1년": "1y", "3년": "3y", "5년": "5y", "10년": "10y"
 }
 
@@ -291,7 +291,7 @@ def load_and_calculate_data(code, tf, period_str):
             ticker_obj = yf.Ticker(yf_code)
             df = ticker_obj.history(period=yf_period, interval=interval)
             if not df.empty:
-                df.index = df.index.tz_localize(None) # 타임존 제거
+                df.index = df.index.tz_localize(None)
         except Exception:
             df = pd.DataFrame()
             
@@ -438,7 +438,6 @@ try:
         tab1, tab2 = st.tabs(["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교"])
 
         with tab1:
-            # 분봉일 때 X축 라벨 포맷 (월-일 시:분)
             is_intraday = "m" in tf_config[timeframe]["interval"]
             if is_intraday:
                 x_axis_data = display_df.index.strftime('%m-%d %H:%M')
@@ -550,7 +549,6 @@ try:
                 hovermode='x unified'
             )
 
-            # 분봉일 때 휴장 공백 제거를 위해 X축을 범주형(category)으로 강제 지정
             if is_intraday:
                 fig.update_xaxes(type='category', nticks=10)
 
