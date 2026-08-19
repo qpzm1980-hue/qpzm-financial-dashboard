@@ -24,7 +24,7 @@ def select_scanner_stock(name, code):
     st.session_state["category_radio"] = "국내주식 (KRX)"
     st.session_state["custom_stock_name"] = name
     st.session_state["custom_stock_code"] = code
-    st.session_state["active_tab_index"] = 0
+    st.session_state["active_tab_index"] = 0  # 첫 번째 시트(인터랙티브 차트)로 즉시 전환
 
 # ==================== 1. 비공개 접속 비밀번호 인증 ====================
 def check_password():
@@ -396,9 +396,9 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
-# ==================== ⚡ 정밀 수급 첫 폭발 스캐너 (직전 5일간 2천억 미만 & 전일 대비 증가) ====================
+# ==================== ⚡ 1천억 기준 정밀 첫 수급 돌파 스캐너 ====================
 @st.cache_data(ttl=300)
-def scan_volume_surge_stocks_strict():
+def scan_volume_surge_stocks_100b():
     try:
         today = datetime.date.today()
         sample_hist = fdr.DataReader("005930", today - datetime.timedelta(days=15))
@@ -430,8 +430,8 @@ def scan_volume_surge_stocks_strict():
         if amt_col is None:
             return pd.DataFrame(), scan_date
 
-        # 당일 2,000억 이상 유입된 종목 1차 추출
-        targets = df_krx[df_krx[amt_col] >= 200_000_000_000].copy()
+        # 당일 1,000억 이상 유입된 종목 1차 추출 (100,000,000,000원)
+        targets = df_krx[df_krx[amt_col] >= 100_000_000_000].copy()
 
         if targets.empty:
             return pd.DataFrame(), scan_date
@@ -456,14 +456,14 @@ def scan_volume_surge_stocks_strict():
                         amounts = hist['Close'] * hist['Volume']
 
                     prev_5days = amounts.iloc[-6:-1]
-                    max_5d = prev_5days.max()       # 직전 5일간 하루 최대 거래대금
-                    avg_5d = prev_5days.mean()      # 직전 5일 평균 거래대금
+                    max_5d = prev_5days.max()           # 직전 5일간 일간 최대 거래대금
+                    avg_5d = prev_5days.mean()          # 직전 5일 평균 거래대금
                     yesterday_amt = prev_5days.iloc[-1] # 바로 어제 거래대금
 
-                    # 🎯 정밀 조건:
-                    # 1) 직전 5일 중 단 하루도 2,000억을 넘긴 적이 없음 (진짜 첫 폭발)
+                    # 🎯 1천억 정밀 조건:
+                    # 1) 직전 5영업일 중 단 하루도 1,000억을 넘긴 적이 없음 (잠복기 후 첫 돌파)
                     # 2) 당일 거래대금이 어제 거래대금보다 큼 (수급 증가)
-                    if max_5d < 200_000_000_000 and curr_amount > yesterday_amt:
+                    if max_5d < 100_000_000_000 and curr_amount > yesterday_amt:
                         surge_ratio = (curr_amount / avg_5d) * 100 if avg_5d > 0 else 999.0
                         results.append({
                             '기준일자': scan_date,
@@ -576,7 +576,7 @@ try:
 
         st.markdown("---")
         
-        tab_titles = ["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교", "🔥 2천억 첫 수급 폭발주"]
+        tab_titles = ["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교", "🔥 1천억 첫 수급 폭발주"]
         
         active_tab = st.radio(
             "탭 선택",
@@ -748,18 +748,18 @@ try:
                 st.error(f"수익률 비교 중 오류: {e}")
 
         else:
-            # 🔥 2천억 첫 수급 폭발주 스캐너
-            st.markdown("### 🔥 직전 5일간 2천억 미만 $\\rightarrow$ 당일 2천억 이상 첫 수급 폭발주")
-            st.info("💡 **정밀 조건:** 직전 5영업일 동안 **단 하루도 2,000억을 넘긴 적이 없다가**, 당일 처음으로 2,000억 원 돌파 및 **어제보다 거래대금이 증가한 진짜 수급 분출 종목**만 포착합니다.")
+            # 🔥 1천억 첫 수급 폭발주 스캐너
+            st.markdown("### 🔥 직전 5일간 1천억 미만 $\\rightarrow$ 당일 1천억 이상 첫 수급 폭발주")
+            st.info("💡 **1천억 정밀 조건:** 직전 5영업일 동안 **단 하루도 1,000억을 넘긴 적이 없다가**, 당일 처음으로 1,000억 원 돌파 및 **어제보다 거래대금이 증가한 진짜 수급 분출 종목**만 포착합니다.")
             
-            with st.spinner("KRX 정밀 수급 첫 돌파 종목 탐색 중..."):
-                surge_data, scan_date = scan_volume_surge_stocks_strict()
+            with st.spinner("KRX 1천억 수급 첫 돌파 종목 탐색 중..."):
+                surge_data, scan_date = scan_volume_surge_stocks_100b()
                 
             if scan_date:
                 st.caption(f"📅 **분석 기준 거래일자:** `{scan_date}`")
 
             if not surge_data.empty:
-                st.success(f"기준일({scan_date})에 첫 2,000억 수급 돌파 종목 **{len(surge_data)}개**가 포착되었습니다!")
+                st.success(f"기준일({scan_date})에 첫 1,000억 수급 돌파 종목 **{len(surge_data)}개**가 포착되었습니다!")
                 
                 for idx, r in surge_data.iterrows():
                     c_code = r['Code']
@@ -805,7 +805,7 @@ try:
                     height=250
                 )
             else:
-                st.warning(f"기준일({scan_date})에 '직전 5일간 2천억 미만 유지 $\\rightarrow$ 당일 2천억 첫 돌파' 조건을 만족하는 종목이 없습니다.")
+                st.warning(f"기준일({scan_date})에 '직전 5일간 1천억 미만 유지 $\\rightarrow$ 당일 1천억 첫 돌파' 조건을 만족하는 종목이 없습니다.")
 
 except Exception as e:
     st.error(f"데이터 조회 중 예기치 않은 오류가 발생했습니다: {e}")
