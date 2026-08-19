@@ -268,7 +268,7 @@ if "APP_PASSWORD" in st.secrets:
         st.session_state["authenticated"] = False
         st.rerun()
 
-# ==================== 데이터 및 지표 계산 함수 (정밀 캔들 변환) ====================
+# ==================== 데이터 로드 및 지표 산출 ====================
 period_map_yf = {
     "1일": "1d", "3일": "3d", "5일": "5d", "1달": "1mo", "1개월": "1mo", 
     "2개월": "2mo", "6개월": "6mo", "1년": "1y", "3년": "3y", "5년": "5y", "10년": "10y", "최대(All)": "max"
@@ -298,12 +298,12 @@ def load_and_calculate_data(code, tf, period_str):
         if df.empty:
             return df
     else:
-        # 2) 일봉/주봉/월봉 조회 (과거 200개 이상 충분한 데이터 로드)
+        # 2) 일봉 / 주봉 / 월봉 조회
         today = datetime.date.today()
         if tf == "월봉":
-            start_d = today - datetime.timedelta(days=365 * 25) # 월봉 200선을 위해 최대 25년 확보
+            start_d = today - datetime.timedelta(days=365 * 25)
         elif tf == "주봉":
-            start_d = today - datetime.timedelta(days=365 * 10) # 주봉 200선을 위해 10년 확보
+            start_d = today - datetime.timedelta(days=365 * 10)
         else:
             days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10, "최대(All)": 365*20}
             start_d = today - datetime.timedelta(days=days_calc.get(period_str, 365) + 400)
@@ -316,7 +316,7 @@ def load_and_calculate_data(code, tf, period_str):
         if df.empty:
             return df
 
-        # 먼저 주봉/월봉으로 완벽히 리샘플링
+        # 일봉 -> 주봉 / 월봉 리샘플링
         if tf == "주봉":
             df = df.resample('W-FRI').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
         elif tf == "월봉":
@@ -325,7 +325,7 @@ def load_and_calculate_data(code, tf, period_str):
     if 'Volume' not in df.columns:
         df['Volume'] = 0
 
-    # 리샘플링 완료된 캔들 기준으로 기술적 지표 산출
+    # 기술적 보조지표 계산
     df['20선'] = df['Close'].rolling(20).mean()
     df['50선'] = df['Close'].rolling(50).mean()
     df['100선'] = df['Close'].rolling(100).mean()
@@ -347,7 +347,7 @@ def load_and_calculate_data(code, tf, period_str):
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
-    # 기간별 캔들 개수 정확하게 슬라이싱
+    # 기간별 캔들 개수 슬라이싱
     if "m" not in interval:
         if period_str != "최대(All)":
             days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
@@ -444,10 +444,12 @@ try:
 
         with tab1:
             is_intraday = "m" in tf_config[timeframe]["interval"]
+            
+            # X축 데이터 분기 (분봉은 텍스트 연속축, 일/주/월봉은 고유 Timestamp)
             if is_intraday:
-                x_axis_data = display_df.index.strftime('%m-%d %H:%M')
+                x_data = display_df.index.strftime('%Y-%m-%d %H:%M')
             else:
-                x_axis_data = display_df.index
+                x_data = display_df.index
 
             has_vol = bool(display_df['Volume'].sum() > 0)
             rows = 1
@@ -483,7 +485,7 @@ try:
 
             fig.add_trace(
                 go.Candlestick(
-                    x=x_axis_data,
+                    x=x_data,
                     open=display_df['Open'], high=display_df['High'],
                     low=display_df['Low'], close=display_df['Close'],
                     name='시세', increasing_line_color='#26A69A', decreasing_line_color='#EF5350'
@@ -496,17 +498,17 @@ try:
                 for ma_name, color in ma_colors.items():
                     if ma_name in display_df.columns:
                         fig.add_trace(
-                            go.Scatter(x=x_axis_data, y=display_df[ma_name], mode='lines', name=ma_name, line=dict(color=color, width=1.2)),
+                            go.Scatter(x=x_data, y=display_df[ma_name], mode='lines', name=ma_name, line=dict(color=color, width=1.2)),
                             row=current_row, col=1
                         )
 
             if show_bb:
                 fig.add_trace(
-                    go.Scatter(x=x_axis_data, y=display_df['BB_Upper'], mode='lines', name='볼린저 상단', line=dict(color='rgba(200, 200, 200, 0.6)', dash='dot')),
+                    go.Scatter(x=x_data, y=display_df['BB_Upper'], mode='lines', name='볼린저 상단', line=dict(color='rgba(200, 200, 200, 0.6)', dash='dot')),
                     row=current_row, col=1
                 )
                 fig.add_trace(
-                    go.Scatter(x=x_axis_data, y=display_df['BB_Lower'], mode='lines', name='볼린저 하단', line=dict(color='rgba(200, 200, 200, 0.6)', dash='dot'), fill='tonexty', fillcolor='rgba(255, 255, 255, 0.05)'),
+                    go.Scatter(x=x_data, y=display_df['BB_Lower'], mode='lines', name='볼린저 하단', line=dict(color='rgba(200, 200, 200, 0.6)', dash='dot'), fill='tonexty', fillcolor='rgba(255, 255, 255, 0.05)'),
                     row=current_row, col=1
                 )
 
@@ -514,30 +516,30 @@ try:
                 current_row += 1
                 vol_colors = ['#26A69A' if row['Close'] >= row['Open'] else '#EF5350' for _, row in display_df.iterrows()]
                 fig.add_trace(
-                    go.Bar(x=x_axis_data, y=display_df['Volume'], name='거래량', marker_color=vol_colors),
+                    go.Bar(x=x_data, y=display_df['Volume'], name='거래량', marker_color=vol_colors),
                     row=current_row, col=1
                 )
 
             if show_macd:
                 current_row += 1
                 fig.add_trace(
-                    go.Scatter(x=x_axis_data, y=display_df['MACD'], mode='lines', name='MACD', line=dict(color='#29B6F6', width=1.3)),
+                    go.Scatter(x=x_data, y=display_df['MACD'], mode='lines', name='MACD', line=dict(color='#29B6F6', width=1.3)),
                     row=current_row, col=1
                 )
                 fig.add_trace(
-                    go.Scatter(x=x_axis_data, y=display_df['MACD_Signal'], mode='lines', name='Signal', line=dict(color='#FF7043', width=1.3)),
+                    go.Scatter(x=x_data, y=display_df['MACD_Signal'], mode='lines', name='Signal', line=dict(color='#FF7043', width=1.3)),
                     row=current_row, col=1
                 )
                 hist_colors = ['#26A69A' if v >= 0 else '#EF5350' for v in display_df['MACD_Hist']]
                 fig.add_trace(
-                    go.Bar(x=x_axis_data, y=display_df['MACD_Hist'], name='MACD Hist', marker_color=hist_colors),
+                    go.Bar(x=x_data, y=display_df['MACD_Hist'], name='MACD Hist', marker_color=hist_colors),
                     row=current_row, col=1
                 )
 
             if show_rsi:
                 current_row += 1
                 fig.add_trace(
-                    go.Scatter(x=x_axis_data, y=display_df['RSI'], mode='lines', name='RSI(14)', line=dict(color='#AB47BC', width=1.5)),
+                    go.Scatter(x=x_data, y=display_df['RSI'], mode='lines', name='RSI(14)', line=dict(color='#AB47BC', width=1.5)),
                     row=current_row, col=1
                 )
                 fig.add_hline(y=70, line_dash="dash", line_color="#EF5350", row=current_row, col=1, opacity=0.7)
@@ -554,8 +556,11 @@ try:
                 hovermode='x unified'
             )
 
+            # 분봉일 때만 휴장 공백 제거용 범주형 축 적용 (일/주/월봉은 정상 타임라인 축 유지)
             if is_intraday:
                 fig.update_xaxes(type='category', nticks=10)
+            else:
+                fig.update_xaxes(type='date')
 
             st.plotly_chart(fig, use_container_width=True)
 
