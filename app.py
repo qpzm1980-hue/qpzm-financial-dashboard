@@ -357,37 +357,55 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
-# ==================== ⚡ 초고속(1초컷) 수급 폭발 스캐너 함수 ====================
+# ==================== ⚡ 초고속(1초컷) 수급 폭발 스캐너 (기준일자 및 컬럼명 자동 보정) ====================
 @st.cache_data(ttl=300)
 def scan_volume_surge_and_price_spike_fast():
     try:
+        today = datetime.date.today()
+        # 기준 거래일자 확인
+        sample_hist = fdr.DataReader("005930", today - datetime.timedelta(days=15))
+        if sample_hist is None or sample_hist.empty:
+            scan_date = today.strftime('%Y-%m-%d')
+        else:
+            scan_date = sample_hist.index[-1].strftime('%Y-%m-%d')
+
         df_krx = fdr.StockListing('KRX')
         if df_krx.empty:
-            return pd.DataFrame(), ""
+            return pd.DataFrame(), scan_date
 
-        # 등락률 및 거래대금 컬럼 확인
-        chg_col = 'ChgRate' if 'ChgRate' in df_krx.columns else 'ChangesRatio'
-        amt_col = 'Amount' if 'Amount' in df_krx.columns else None
+        # 컬럼명 유연성 확보
+        chg_col = None
+        for col in ['ChgRate', 'ChangesRatio', 'Change', 'chg_rate']:
+            if col in df_krx.columns:
+                chg_col = col
+                break
 
-        if amt_col is None:
-            return pd.DataFrame(), ""
+        # 거래대금 컬럼 확인 (없으면 시가총액/거래량 기반 추산)
+        amt_col = None
+        for col in ['Amount', 'TradeValue', 'amount', 'VolumeValue']:
+            if col in df_krx.columns:
+                amt_col = col
+                break
 
-        # ⚡ 1단계 (0.1초): 당일 거래대금 2,000억 이상 & +10% 이상인 종목만 즉시 추출 (소수 종목으로 압축)
+        if amt_col is None and 'Volume' in df_krx.columns and 'Close' in df_krx.columns:
+            df_krx['Estimated_Amount'] = df_krx['Volume'] * df_krx['Close']
+            amt_col = 'Estimated_Amount'
+
+        if chg_col is None or amt_col is None:
+            return pd.DataFrame(), scan_date
+
+        # ⚡ 1차 필터링: 당일 거래대금 2,000억 원(200,000,000,000) 이상 & 등락률 +10% 이상
         targets = df_krx[(df_krx[amt_col] >= 200_000_000_000) & (df_krx[chg_col] >= 10.0)].copy()
-
-        today = datetime.date.today()
-        sample_hist = fdr.DataReader("005930", today - datetime.timedelta(days=10))
-        scan_date = sample_hist.index[-1].strftime('%Y-%m-%d') if not sample_hist.empty else str(today)
 
         if targets.empty:
             return pd.DataFrame(), scan_date
 
-        # ⚡ 2단계 (1초): 압축된 1~5개 종목에 대해서만 5일 이력 정밀 검증
+        # ⚡ 2차 필터링: 걸러진 1~5개 종목만 5일 이력 정밀 검증
         results = []
-        start_date = today - datetime.timedelta(days=30)
+        start_date = today - datetime.timedelta(days=35)
 
         for _, row in targets.iterrows():
-            code = row['Code']
+            code = str(row['Code']).zfill(6)
             name = row['Name']
             curr_amount = row[amt_col]
             chg_rate = row[chg_col]
@@ -402,11 +420,11 @@ def scan_volume_surge_and_price_spike_fast():
                     else:
                         amounts = hist['Close'] * hist['Volume']
 
-                    # 직전 5영업일 평균 거래대금 산출
+                    # 직전 5영업일 평균 거래대금
                     prev_5days = amounts.iloc[-6:-1]
                     avg_5d = prev_5days.mean()
 
-                    # 조건 3: 평소 2,000억 미만이었던 종목만 확정
+                    # 조건 3: 평소 2,000억 미만이었던 종목만 최종 선별
                     if avg_5d < 200_000_000_000:
                         surge_ratio = (curr_amount / avg_5d) * 100 if avg_5d > 0 else 999.0
                         results.append({
@@ -415,7 +433,7 @@ def scan_volume_surge_and_price_spike_fast():
                             'Name': name,
                             'Close': close_val,
                             'ChgRate': chg_rate,
-                            '거래대금(억원)': round(curr_amount / 100_000_000, 1),
+                            '당일거래대금(억원)': round(curr_amount / 100_000_000, 1),
                             '직전5일평균(억원)': round(avg_5d / 100_000_000, 1),
                             '수급폭증률': f"{surge_ratio:,.0f}%",
                             '시가총액(억원)': round(marcap_val / 100_000_000, 0),
@@ -431,7 +449,7 @@ def scan_volume_surge_and_price_spike_fast():
         return res_df, scan_date
 
     except Exception:
-        return pd.DataFrame(), ""
+        return pd.DataFrame(), str(datetime.date.today())
 
 # ==================== 본문 렌더링 ====================
 try:
@@ -688,7 +706,7 @@ try:
                 surge_data, scan_date = scan_volume_surge_and_price_spike_fast()
                 
             if scan_date:
-                st.caption(f"📅 **분석 기준 거래일자:** {scan_date}")
+                st.caption(f"📅 **분석 기준 거래일자:** `{scan_date}`")
 
             if not surge_data.empty:
                 st.success(f"기준일({scan_date})에 조건을 만족한 주도주 **{len(surge_data)}개**가 포착되었습니다!")
@@ -697,7 +715,7 @@ try:
                     surge_data.style.format({
                         'Close': '{:,.0f}원',
                         'ChgRate': '{:+.2f}%',
-                        '거래대금(억원)': '{:,.1f} 억',
+                        '당일거래대금(억원)': '{:,.1f} 억',
                         '직전5일평균(억원)': '{:,.1f} 억',
                         '시가총액(억원)': '{:,.0f} 억'
                     }),
@@ -705,7 +723,7 @@ try:
                     height=450
                 )
             else:
-                st.warning(f"기준일({scan_date})에 '평소 2천억 미만 $\\rightarrow$ 2천억 돌파 및 +10% 이상 상승' 조건을 만족하는 종목이 없습니다.")
+                st.warning(f"기준일({scan_date})에 '평소 2천억 미만 $\\rightarrow$ 2천억 돌파 및 +10% 이상 상승' 조건을 만족하는 종목이 없습니다. (당일 해당 조건을 달성한 주도주가 없음을 의미합니다)")
 
 except Exception as e:
     st.error(f"데이터 조회 중 예기치 않은 오류가 발생했습니다: {e}")
