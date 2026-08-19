@@ -2,6 +2,7 @@ import datetime
 import streamlit as st
 import pandas as pd
 import numpy as np
+import yfinance as yf
 import FinanceDataReader as fdr
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -132,7 +133,7 @@ def get_us_stocks():
         "USAR - US Gold Corp": "USAU"
     }
 
-# 3. 채권(Bonds) 리스트 (안정적인 글로벌 & 국내 국채 종목으로 교체)
+# 3. 채권(Bonds) 리스트
 def get_bonds():
     return {
         "TLT (미국 20년+ 장기국채 ETF)": "TLT",
@@ -208,7 +209,7 @@ if input_mode == "목록에서 선택":
         currency_symbol = "원"
     elif category == "채권 (Bonds)":
         STOCKS = get_bonds()
-        currency_symbol = "%"
+        currency_symbol = "USD"
     elif category == "원자재 (Commodity)":
         STOCKS = get_commodities()
         currency_symbol = "USD"
@@ -221,33 +222,33 @@ if input_mode == "목록에서 선택":
 
     selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=list(STOCKS.keys()), index=0)
     selected_code = STOCKS[selected_name]
-    
-    # 채권 ETF인 경우 단위 USD로 보정
-    if category == "채권 (Bonds)" and any(etf in selected_code for etf in ["TLT", "IEF", "SHY", "TMF"]):
-        currency_symbol = "USD"
 else:
-    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: US10YT, TLT, GC=F, NVDA, BTC/USD)", value="US10YT").strip()
+    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: GC=F, NVDA, 005930, BTC-USD)", value="NVDA").strip()
     selected_name = f"Custom: {direct_ticker}"
     selected_code = direct_ticker
     category = "직접입력"
-    if "YT" in direct_ticker or "3MT" in direct_ticker:
-        currency_symbol = "%"
-    elif direct_ticker.isdigit() or "KRW" in direct_ticker:
-        currency_symbol = "원"
-    else:
-        currency_symbol = "USD"
+    currency_symbol = "원" if (direct_ticker.isdigit() or "KRW" in direct_ticker) else "USD"
 
-timeframe = st.sidebar.radio("📊 차트 주기 (봉 단위)", ["일봉", "주봉", "월봉"], index=0)
-
-period_options = {
-    "1달": 30,
-    "6개월": 180,
-    "1년": 365,
-    "3년": 365 * 3,
-    "5년": 365 * 5,
-    "10년": 365 * 10
+# 1분봉 제외 6대 주기 및 자동 최적화 매핑
+tf_config = {
+    "5분봉": {"default": "5일", "options": ["1일", "5일", "1개월", "2개월"], "interval": "5m"},
+    "30분봉": {"default": "1개월", "options": ["5일", "1개월", "2개월"], "interval": "30m"},
+    "1시간봉": {"default": "1개월", "options": ["5일", "1개월", "2개월", "6개월"], "interval": "60m"},
+    "일봉": {"default": "1년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년"], "interval": "1d"},
+    "주봉": {"default": "3년", "options": ["6개월", "1년", "3년", "5년", "10년"], "interval": "1wk"},
+    "월봉": {"default": "5년", "options": ["1년", "3년", "5년", "10년"], "interval": "1mo"}
 }
-selected_period = st.sidebar.select_slider("📅 조회 기간", options=list(period_options.keys()), value="1년")
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("⏱️ 차트 주기 & 기간")
+timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=3) # 기본값: 일봉
+
+current_cfg = tf_config[timeframe]
+selected_period = st.sidebar.select_slider(
+    "📅 조회 기간 (자동 최적화)",
+    options=current_cfg["options"],
+    value=current_cfg["default"]
+)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📐 보조지표 표시")
@@ -267,67 +268,93 @@ if "APP_PASSWORD" in st.secrets:
         st.session_state["authenticated"] = False
         st.rerun()
 
-today = datetime.date.today()
-display_start_date = today - datetime.timedelta(days=period_options[selected_period])
-fetch_start_date = display_start_date - datetime.timedelta(days=400)
+# ==================== 데이터 및 지표 계산 함수 ====================
+period_map_yf = {
+    "1일": "1d", "5일": "5d", "1달": "1mo", "1개월": "1mo", 
+    "2개월": "2mo", "6개월": "6mo", "1년": "1y", "3년": "3y", "5년": "5y", "10년": "10y"
+}
 
-# ==================== 데이터 및 지표 계산 (5분 캐시 설정) ====================
-@st.cache_data(ttl=300)
-def load_and_calculate_data(code, start_date, tf):
-    try:
-        df = fdr.DataReader(code, start_date)
-    except Exception:
-        return pd.DataFrame()
+@st.cache_data(ttl=60)
+def load_and_calculate_data(code, tf, period_str):
+    interval = tf_config[tf]["interval"]
+    yf_period = period_map_yf.get(period_str, "1y")
+
+    # 1) 분봉 조회 (5m, 30m, 60m) -> yfinance 호출
+    if "m" in interval:
+        yf_code = code
+        if code.isdigit() and len(code) == 6:
+            yf_code = f"{code}.KS"
+        elif "/" in code:
+            yf_code = code.replace("/", "-")
+            
+        try:
+            ticker_obj = yf.Ticker(yf_code)
+            df = ticker_obj.history(period=yf_period, interval=interval)
+        except Exception:
+            df = pd.DataFrame()
+            
+        if df.empty:
+            return df
+    else:
+        # 2) 일봉/주봉/월봉 조회 -> FinanceDataReader 기반
+        today = datetime.date.today()
+        days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
+        d_days = days_calc.get(period_str, 365)
+        start_d = today - datetime.timedelta(days=d_days + 350)
         
-    if df is None or df.empty:
-        return df
+        try:
+            df = fdr.DataReader(code, start_d)
+        except Exception:
+            df = pd.DataFrame()
+
+        if df.empty:
+            return df
+
+        if tf == "주봉":
+            df = df.resample('W').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
+        elif tf == "월봉":
+            df = df.resample('ME').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
+
     if 'Volume' not in df.columns:
         df['Volume'] = 0
-        
-    if tf == "주봉":
-        df = df.resample('W').agg({
-            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-        }).dropna()
-    elif tf == "월봉":
-        df = df.resample('ME').agg({
-            'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
-        }).dropna()
-        
-    # 이동평균선
+
+    # 지표 산출
     df['20선'] = df['Close'].rolling(20).mean()
     df['50선'] = df['Close'].rolling(50).mean()
     df['100선'] = df['Close'].rolling(100).mean()
     df['200선'] = df['Close'].rolling(200).mean()
 
-    # 볼린저 밴드
     std20 = df['Close'].rolling(20).std()
     df['BB_Upper'] = df['20선'] + (std20 * 2)
     df['BB_Lower'] = df['20선'] - (std20 * 2)
 
-    # RSI (14)
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # MACD
     exp12 = df['Close'].ewm(span=12, adjust=False).mean()
     exp26 = df['Close'].ewm(span=26, adjust=False).mean()
     df['MACD'] = exp12 - exp26
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
+    # 표시 기간 슬라이싱
+    if "m" not in interval:
+        today = datetime.date.today()
+        days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
+        disp_start = today - datetime.timedelta(days=days_calc.get(period_str, 365))
+        df = df.loc[df.index >= pd.to_datetime(disp_start)]
+
     return df
 
 try:
-    df = load_and_calculate_data(selected_code, fetch_start_date, timeframe)
+    display_df = load_and_calculate_data(selected_code, timeframe, selected_period)
     
-    if df is None or df.empty:
-        st.error(f"티커 '{selected_code}'의 데이터를 가져올 수 없습니다. 올바른 티커인지 확인해 주세요.")
+    if display_df is None or display_df.empty:
+        st.error(f"티커 '{selected_code}'의 데이터를 가져올 수 없습니다. 주기 및 선택 정보를 확인해 주세요.")
     else:
-        display_df = df.loc[df.index >= pd.to_datetime(display_start_date)]
-        
         latest_close = float(display_df['Close'].iloc[-1])
         prev_close = float(display_df['Close'].iloc[-2]) if len(display_df) > 1 else latest_close
         price_chg = latest_close - prev_close
@@ -336,8 +363,8 @@ try:
         if currency_symbol == "USD":
             formatted_close = f"{latest_close:,.2f}" if latest_close >= 1 else f"{latest_close:.4f}"
             delta_str = f"{price_chg:+,.2f} ({price_chg_pct:+.2f}%)"
-        elif currency_symbol == "%":
-            formatted_close = f"{latest_close:.3f}"
+        elif "^" in selected_code:
+            formatted_close = f"{latest_close:.3f}%"
             delta_str = f"{price_chg:+.3f}%p ({price_chg_pct:+.2f}%)"
         else:
             formatted_close = f"{int(latest_close):,}" if category == "국내주식 (KRX)" else f"{latest_close:,.2f}"
@@ -346,29 +373,19 @@ try:
         st.markdown("### 📌 시장 핵심 요약")
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("선택 종목/자산", selected_name.split(' - ')[0].split(' (')[0])
-        m2.metric("현재 시세/금리", f"{formatted_close} {currency_symbol}", delta=delta_str)
+        m2.metric("현재 시세", f"{formatted_close} {currency_symbol}", delta=delta_str)
 
-        one_year_df = df.loc[df.index >= (pd.to_datetime(today) - pd.Timedelta(days=365))]
-        if not one_year_df.empty:
-            high_52w = one_year_df['High'].max()
-            low_52w = one_year_df['Low'].min()
-            drop_from_high = ((latest_close - high_52w) / high_52w) * 100
-            
-            cummax = display_df['Close'].cummax()
-            drawdown = (display_df['Close'] - cummax) / cummax
-            mdd = drawdown.min() * 100
+        # 52주 / 선택 기간 최고/최저
+        high_val = display_df['High'].max()
+        low_val = display_df['Low'].min()
+        drop_from_high = ((latest_close - high_val) / high_val) * 100
+        
+        cummax = display_df['Close'].cummax()
+        drawdown = (display_df['Close'] - cummax) / cummax
+        mdd = drawdown.min() * 100
 
-            if currency_symbol == "%":
-                m3.metric("52주 최고 / 최저", f"{high_52w:.3f}% / {low_52w:.3f}%", f"고점대비 {drop_from_high:+.1f}%")
-            elif currency_symbol == "원":
-                m3.metric("52주 최고 / 최저", f"{high_52w:,.0f} / {low_52w:,.0f}", f"고점대비 {drop_from_high:+.1f}%")
-            else:
-                m3.metric("52주 최고 / 최저", f"{high_52w:,.2f} / {low_52w:,.2f}", f"고점대비 {drop_from_high:+.1f}%")
-
-            m4.metric("기간 내 MDD (최대 낙폭)", f"{mdd:.2f}%", delta_color="inverse")
-        else:
-            m3.metric("52주 고/저", "-")
-            m4.metric("MDD", "-")
+        m3.metric("기간 최고 / 최저", f"{high_val:,.0f} / {low_val:,.0f}" if currency_symbol=="원" else f"{high_val:,.2f} / {low_val:,.2f}", f"고점대비 {drop_from_high:+.1f}%")
+        m4.metric("기간 내 MDD (최대 낙폭)", f"{mdd:.2f}%", delta_color="inverse")
 
         st.markdown("---")
         st.markdown("#### 🚦 기술적 지표 자동 진단 시그널")
@@ -382,7 +399,7 @@ try:
             else:
                 sig_col1.markdown("이평선 추세: <span class='signal-badge-bear'>데드크로스 구간 (역배열)</span>", unsafe_allow_html=True)
         else:
-            sig_col1.markdown("이평선 추세: <span class='signal-badge-neutral'>데이터 부족</span>", unsafe_allow_html=True)
+            sig_col1.markdown("이평선 추세: <span class='signal-badge-neutral'>데이터 계산 중</span>", unsafe_allow_html=True)
 
         latest_rsi = display_df['RSI'].iloc[-1]
         if pd.notna(latest_rsi):
@@ -422,7 +439,7 @@ try:
         with tab1:
             has_vol = bool(display_df['Volume'].sum() > 0)
             rows = 1
-            subplot_titles = ["가격/금리 및 이평선 / 볼린저 밴드"]
+            subplot_titles = ["가격 및 이평선 / 볼린저 밴드"]
             row_heights = [0.55]
             
             if has_vol:
@@ -529,22 +546,19 @@ try:
         with tab2:
             st.markdown("#### 📊 타 자산 및 주요 지수와의 누적 수익률(%) 비교")
             comp_targets = {
-                "미국 10년물 국채금리 (US10YT)": "US10YT",
-                "TLT (미국 20년+ 국채 ETF)": "TLT",
-                "Gold (금 선물)": "GC=F",
                 "S&P 500 지수 (미국 대형주)": "US500",
                 "나스닥 100 지수 (기술주)": "IXIC",
                 "KOSPI 지수 (국내 종합)": "KS11",
+                "Gold (금 선물)": "GC=F",
                 "비트코인 (BTC/USD)": "BTC/USD",
                 "원/달러 환율 (USD/KRW)": "USD/KRW",
-                "테슬라 (TSLA)": "TSLA",
-                "엔비디아 (NVDA)": "NVDA"
+                "TLT (미국 20년+ 국채 ETF)": "TLT"
             }
             selected_comp = st.selectbox("비교할 대상 자산/지수 선택", options=list(comp_targets.keys()), index=0)
             comp_code = comp_targets[selected_comp]
             
             try:
-                comp_df = fdr.DataReader(comp_code, display_start_date)
+                comp_df = fdr.DataReader(comp_code, display_df.index[0])
                 if not comp_df.empty:
                     base_main = display_df['Close'] / display_df['Close'].iloc[0] * 100 - 100
                     base_comp = comp_df['Close'] / comp_df['Close'].iloc[0] * 100 - 100
