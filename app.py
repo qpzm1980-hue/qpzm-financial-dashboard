@@ -457,16 +457,14 @@ def load_and_calculate_data(code, tf, period_str, custom_start_date=None):
 
     return df
 
-# ==================== 🏢 100% 순수 분기 실적(Quarterly Only) 로더 (절벽 왜곡 완전 제거) ====================
+# ==================== 🏢 100% 순수 분기 실적(Quarterly Only) 로더 ====================
 @st.cache_data(ttl=3600)
 def load_pure_quarterly_financials(code):
     """국내 주식(네이버/FnGuide 분기 전용) 및 해외 주식(야후 분기 전용) 순수 분기 실적 추출"""
-    # 1. 국내 주식 (6자리 숫자 티커)
     if str(code).isdigit() and len(str(code)) == 6:
         res_dict = {}
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         
-        # A. 네이버 금융 메인 기업실적분석 분기 테이블 (최근 6~8개 분기 순수 데이터)
         try:
             naver_url = f"https://finance.naver.com/item/main.naver?code={code}"
             n_res = requests.get(naver_url, headers=headers, timeout=5)
@@ -475,14 +473,11 @@ def load_pure_quarterly_financials(code):
                 for t in n_tables:
                     if any("주요재무정보" in str(col) for col in t.columns) or any("매출액" in str(idx) for idx in t.iloc[:, 0]):
                         df_nt = t.copy()
-                        
-                        # 멀티인덱스 칼럼 중 '최근 분기 실적'에 해당하는 열만 정확히 필터링
                         if isinstance(df_nt.columns, pd.MultiIndex):
                             q_cols = []
                             for c in df_nt.columns:
                                 top_level = str(c[0])
                                 sub_level = str(c[1])
-                                # '분기' 키워드가 들어간 상위 컬럼 하위의 날짜만 추출 (연간 합산 데이터 원천 배제)
                                 if "분기" in top_level and re.search(r'\d{4}\.\d{2}', sub_level):
                                     q_cols.append(c)
                             
@@ -519,19 +514,15 @@ def load_pure_quarterly_financials(code):
         except Exception:
             pass
 
-        # B. FnGuide 포괄손익계산서 중 '분기(Quarterly)' 전용 테이블에서 과거 분기 보완
         try:
             fn_url = f"http://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp?pGB=1&gicode=A{code}"
             fn_res = requests.get(fn_url, headers=headers, timeout=6)
             if fn_res.status_code == 200:
                 tables = pd.read_html(StringIO(fn_res.text))
                 for t in tables:
-                    # 표 제목이나 칼럼에 분기 단위 표시가 있는 포괄손익계산서 테이블만 선택
                     if any("매출액" in str(idx) for idx in t.iloc[:, 0]):
                         df_t = t.copy()
                         df_t.set_index(df_t.columns[0], inplace=True)
-                        
-                        # 03, 06, 09, 12월 분기 날짜 열만 선택
                         date_cols = [c for c in df_t.columns if re.search(r'\d{4}/(03|06|09|12)', str(c)) and '전년' not in str(c)]
                         
                         for d_col in date_cols:
@@ -567,20 +558,18 @@ def load_pure_quarterly_financials(code):
 
         if res_dict:
             fin_df = pd.DataFrame.from_dict(res_dict, orient='index').sort_index()
-            # 순수 분기 실적 기준 YoY (4분기 전 대비) 및 QoQ (직전 분기 대비) 계산
             if 'Revenue_Eok' in fin_df.columns:
                 fin_df['Rev_YoY'] = fin_df['Revenue_Eok'].pct_change(4) * 100
                 fin_df['Rev_YoY'] = fin_df['Rev_YoY'].fillna(fin_df['Revenue_Eok'].pct_change(1) * 100)
             if 'NetIncome_Eok' in fin_df.columns:
                 fin_df['Net_YoY'] = fin_df['NetIncome_Eok'].pct_change(4) * 100
-                fin_df['Net_YoY'] = fin_df['Net_YoY'].fillna(fin_df['NetIncome_Eok'].pct_change(1) * 100)
+                fin_df['Net_YoY'] = fin_df['NetIncome_Eok'].fillna(fin_df['NetIncome_Eok'].pct_change(1) * 100)
 
             if 'Revenue_Eok' in fin_df.columns and 'NetIncome_Eok' in fin_df.columns:
                 fin_df['Net_Margin'] = (fin_df['NetIncome_Eok'] / fin_df['Revenue_Eok']) * 100
 
             return fin_df.dropna(how='all')
 
-    # 2. 해외 주식 (미국 주식 등) -> Yahoo Finance 순수 분기 파싱
     try:
         ticker = yf.Ticker(code)
         q_fin = ticker.quarterly_financials
@@ -594,7 +583,7 @@ def load_pure_quarterly_financials(code):
         res = pd.DataFrame(index=q_df.index)
         for rev_col in ['Total Revenue', 'Operating Revenue', 'Revenue']:
             if rev_col in q_df.columns:
-                res['Revenue_Eok'] = q_df[rev_col] / 1_000_000_000 # 해외는 Billion USD
+                res['Revenue_Eok'] = q_df[rev_col] / 1_000_000_000
                 break
                 
         for net_col in ['Net Income', 'Net Income Common Stockholders']:
@@ -1347,9 +1336,9 @@ try:
                 st.info("💡 조건을 설정한 뒤 **[🧊 소외주 전수 스캔]** 버튼을 눌러주세요.")
 
         else:
-            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 실적-주가 복합 차트 (완전 동기화) ====================
+            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 실적-주가 복합 차트 (주기 완벽 연동) ====================
             st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 분기 실적(KPI) 오버레이 차트")
-            st.caption("100% 순수 분기 실적 데이터와 주가 시계열을 1:1로 일치시켜 TrendSpider 정통 스타일로 시각화합니다.")
+            st.caption("100% 순수 분기 실적 데이터와 선택하신 차트 주기(일봉/주봉/월봉 등)를 1:1로 일치시켜 TrendSpider 정통 스타일로 시각화합니다.")
 
             is_korean_stock = str(selected_code).isdigit() and len(str(selected_code)) == 6
             data_source_name = "네이버 증권 & FnGuide 분기 데이터" if is_korean_stock else "Yahoo Finance 분기 데이터"
@@ -1362,24 +1351,24 @@ try:
             else:
                 unit_label = "억원" if is_korean_stock else "Billion USD"
                 
-                # 🎯 주가 데이터를 실적 시작 시점에 맞추어 자동 동기화
+                # 🎯 사이드바에서 선택된 주기(timeframe: 일봉/주봉/월봉 등)를 그대로 반영하여 주가 동기화
                 first_q_date = q_fin_df.index[0] - datetime.timedelta(days=90)
-                synced_price_df = load_and_calculate_data(selected_code, "일봉", "최대(All)", custom_start_date=first_q_date)
+                synced_price_df = load_and_calculate_data(selected_code, timeframe, selected_period, custom_start_date=first_q_date)
                 if synced_price_df.empty:
                     synced_price_df = display_df
 
                 # 1. 상단 TrendSpider 스타일 메인 차트
-                st.markdown(f"#### 📈 주가 & 분기 실적 스텝 오버레이 (데이터 출처: `{data_source_name}`)")
+                st.markdown(f"#### 📈 주가 & 분기 실적 스텝 오버레이 (현재 주기: `{timeframe}` | 데이터 출처: `{data_source_name}`)")
                 
                 fig_ts = make_subplots(specs=[[{"secondary_y": True}]])
                 
-                # A. 기본 주가 라인 차트 (동기화된 전체 기간)
+                # A. 기본 주가 라인 차트 (선택된 주기에 따른 시계열 반영)
                 fig_ts.add_trace(
                     go.Scatter(
                         x=synced_price_df.index,
                         y=synced_price_df['Close'],
                         mode='lines',
-                        name='주가 (Close)',
+                        name=f'주가 ({timeframe})',
                         line=dict(color='#29B6F6', width=2),
                         fill='tozeroy',
                         fillcolor='rgba(41, 182, 246, 0.04)'
@@ -1399,7 +1388,6 @@ try:
                     r_val = q_fin_df['Revenue_Eok'].iloc[i] if 'Revenue_Eok' in q_fin_df.columns else np.nan
                     n_val = q_fin_df['NetIncome_Eok'].iloc[i] if 'NetIncome_Eok' in q_fin_df.columns else np.nan
                     
-                    # 계단 박스 시작점과 끝점
                     step_x.extend([curr_dt, next_dt])
                     step_rev.extend([r_val, r_val])
                     step_net.extend([n_val, n_val])
@@ -1416,7 +1404,6 @@ try:
                         secondary_y=True
                     )
 
-                    # TrendSpider 스타일 라벨 배지 생성 (각 분기 중앙 지점에 표시)
                     badge_x = []
                     badge_y = []
                     badge_texts = []
