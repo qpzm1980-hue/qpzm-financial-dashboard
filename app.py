@@ -97,7 +97,7 @@ def get_krx_stocks():
         df = fdr.StockListing('KRX')
         df = df.sort_values(by='Marcap', ascending=False).head(150)
         return dict(zip(df['Name'], df['Code']))
-    except Exception: return {"SK하이닉스": "000660", "삼성전자": "005930", "LG에너지솔루션": "373220", "현대차": "005380"}
+    except Exception: return {"삼성전자": "005930", "SK하이닉스": "000660", "현대차": "005380", "LG에너지솔루션": "373220"}
 
 def get_us_stocks():
     return {
@@ -130,7 +130,7 @@ if input_mode == "목록에서 선택":
     selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=options_list, index=selected_idx)
     selected_code = STOCKS[selected_name]
 else:
-    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: 000660, 005930, 005380, TSLA)", value="000660").strip()
+    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: 005930, 000660, 005380, TSLA)", value="005930").strip()
     selected_name = f"Custom: {direct_ticker}"
     selected_code = direct_ticker
     currency_symbol = "원" if (direct_ticker.isdigit() or "KRW" in direct_ticker) else "USD"
@@ -161,7 +161,7 @@ show_rsi = st.sidebar.checkbox("RSI (14)", value=True)
 show_macd = st.sidebar.checkbox("MACD (12, 26, 9)", value=True)
 
 if "DART_API_KEY" in st.secrets:
-    st.sidebar.success("🏛️ 100% DART & SEC 전자공시 전용 연동")
+    st.sidebar.success("🏛️ 100% DART & SEC 공식 연동")
 
 if st.sidebar.button("🔄 최신 시세 강제 갱신"):
     st.cache_data.clear()
@@ -212,51 +212,49 @@ def load_and_calculate_data(code, tf, period_str):
         df = df.loc[df.index >= pd.to_datetime(disp_start)]
     return df
 
-# ==================== 🏛️ 100% 순수 DART API 전용 파이프라인 ====================
+# ==================== 🏛️ 안전한 DART 100% 전자공시 파이프라인 ====================
+DART_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*"
+}
+
 @st.cache_data(ttl=86400)
 def get_dart_corp_code_map(dart_key):
+    # 주요 상장사 즉시 fallback 맵
+    base_map = {
+        "005930": "00126380", "000660": "00164779", "005380": "00164742",
+        "000270": "00106641", "373220": "01515323", "068270": "00560348",
+        "035420": "00266961", "035720": "00258801", "051910": "00356361",
+        "006400": "00149947", "005490": "00149929", "032830": "00155027"
+    }
     try:
         url = f"https://opendart.fss.or.kr/api/corpCode.xml?crtfc_key={dart_key}"
-        resp = requests.get(url, timeout=12)
-        if resp.status_code == 200:
+        resp = requests.get(url, headers=DART_HEADERS, timeout=10)
+        if resp.status_code == 200 and len(resp.content) > 1000:
             with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
                 xml_data = z.read('CORPCODE.xml')
                 tree = ET.fromstring(xml_data)
-                code_map = {}
                 for item in tree.findall('list'):
                     c_code = item.findtext('corp_code')
                     s_code = item.findtext('stock_code')
                     if s_code and len(s_code.strip()) == 6 and c_code:
-                        code_map[s_code.strip()] = str(c_code.strip()).zfill(8)
-                if code_map: return code_map
+                        base_map[s_code.strip()] = str(c_code.strip()).zfill(8)
     except Exception: pass
-    return {
-        "005930": "00126380", # 삼성전자
-        "000660": "00164779", # SK하이닉스
-        "005380": "00164742", # 현대차
-        "000270": "00106641", # 기아
-        "373220": "01515323", # LG에너지솔루션
-        "068270": "00560348", # 셀트리온
-        "035420": "00266961", # NAVER
-        "035720": "00258801", # 카카오
-        "051910": "00356361", # LG화학
-        "006400": "00149947"  # 삼성SDI
-    }
+    return base_map
 
 def fetch_single_dart_report(args):
     dart_key, corp_code, y, r_code, end_day, q_num = args
     corp_code_8 = str(corp_code).zfill(8)
     
-    # DART 공식 쿼리: fnlttSinglAcnt (주요계정) 및 fnlttSinglAcntAll (전체계정) 전수 시도
-    endpoints = [
+    # 1. fnlttSinglAcnt (주요계정) -> 2. fnlttSinglAcntAll (전체계정)
+    urls = [
         f"https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key={dart_key}&corp_code={corp_code_8}&bsns_year={y}&reprt_code={r_code}",
-        f"https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key={dart_key}&corp_code={corp_code_8}&bsns_year={y}&reprt_code={r_code}&fs_div=CFS",
-        f"https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key={dart_key}&corp_code={corp_code_8}&bsns_year={y}&reprt_code={r_code}&fs_div=OFS"
+        f"https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key={dart_key}&corp_code={corp_code_8}&bsns_year={y}&reprt_code={r_code}&fs_div=CFS"
     ]
     
-    for url in endpoints:
+    for url in urls:
         try:
-            resp = requests.get(url, timeout=4).json()
+            resp = requests.get(url, headers=DART_HEADERS, timeout=4).json()
             if resp.get("status") == "000" and "list" in resp:
                 items = resp["list"]
                 items_cfs = [it for it in items if it.get("fs_div") == "CFS"]
@@ -299,19 +297,11 @@ def fetch_single_dart_report(args):
                         'q_num': q_num,
                         'year': y
                     })
-        except Exception:
-            continue
+        except Exception: continue
     return None
 
 @st.cache_data(ttl=86400)
 def get_sec_cik_map():
-    try:
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
-        r = requests.get('https://www.sec.gov/files/company_tickers.json', headers=headers, timeout=5)
-        if r.status_code == 200:
-            data = r.json()
-            return {v['ticker'].upper(): str(v['cik_str']) for v in data.values()}
-    except Exception: pass
     return {
         "TSLA": "1318605", "META": "1326801", "AAPL": "320193", "NVDA": "1045810",
         "MSFT": "789019", "AMZN": "1018724", "GOOGL": "1652044", "GOOG": "1652044",
@@ -327,26 +317,15 @@ def load_sec_edgar_10y_financials(ticker_symbol):
     if cik:
         try:
             url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik.zfill(10)}.json"
-            headers = {'User-Agent': 'PersonalFinanceTerminal/2.1 (admin@globalinvest.org)'}
+            headers = {'User-Agent': 'FinanceTerminalUser/3.0 (investor@personalfinance.org)'}
             resp = requests.get(url, headers=headers, timeout=8)
             
             if resp.status_code == 200:
                 cf = resp.json().get('facts', {}).get('us-gaap', {})
                 q_dict = {}
 
-                rev_tags = [
-                    'RevenueFromContractWithCustomerExcludingAssessedTax',
-                    'SalesRevenueNet',
-                    'Revenues',
-                    'TotalRevenuesAndOtherIncome',
-                    'SalesRevenueGoodsNet',
-                    'AutomotiveRevenues'
-                ]
-                net_tags = [
-                    'NetIncomeLoss',
-                    'ProfitLoss',
-                    'NetIncomeLossAvailableToCommonStockholdersBasic'
-                ]
+                rev_tags = ['RevenueFromContractWithCustomerExcludingAssessedTax', 'SalesRevenueNet', 'Revenues', 'TotalRevenuesAndOtherIncome', 'SalesRevenueGoodsNet', 'AutomotiveRevenues']
+                net_tags = ['NetIncomeLoss', 'ProfitLoss', 'NetIncomeLossAvailableToCommonStockholdersBasic']
                 op_tags = ['OperatingIncomeLoss']
 
                 def parse_multi_tags(tag_list, val_key):
@@ -365,16 +344,13 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                                     if start_dt:
                                         try:
                                             diff_d = (pd.to_datetime(end_dt) - pd.to_datetime(start_dt)).days
-                                            if 60 <= diff_d <= 115:
-                                                is_quarter = True
+                                            if 60 <= diff_d <= 115: is_quarter = True
                                         except Exception: pass
-                                    elif fp in ['Q1', 'Q2', 'Q3', 'Q4']:
-                                        is_quarter = True
+                                    elif fp in ['Q1', 'Q2', 'Q3', 'Q4']: is_quarter = True
                                         
                                     if is_quarter:
                                         dt_idx = pd.to_datetime(end_dt)
-                                        if dt_idx not in q_dict:
-                                            q_dict[dt_idx] = {}
+                                        if dt_idx not in q_dict: q_dict[dt_idx] = {}
                                         if val_key not in q_dict[dt_idx] or pd.isna(q_dict[dt_idx][val_key]):
                                             q_dict[dt_idx][val_key] = val / 1_000_000_000
 
@@ -426,11 +402,12 @@ def load_global_full_history_financials(code):
             corp_code = corp_map.get(str(code).zfill(6))
             if corp_code:
                 curr_year = datetime.date.today().year
-                years = list(range(2015, curr_year + 1))
+                # 2020년부터 현재 연도까지 안정적으로 수집 (DART Rate Limit 안전 보장)
+                years = list(range(2020, curr_year + 1))
                 reports = [("11013", "03-31", 1), ("11012", "06-30", 2), ("11014", "09-30", 3), ("11011", "12-31", 4)]
                 task_list = [(dart_key, corp_code, y, r_code, end_day, q_num) for y in years for r_code, end_day, q_num in reports]
                 
-                with ThreadPoolExecutor(max_workers=6) as executor:
+                with ThreadPoolExecutor(max_workers=5) as executor:
                     results = executor.map(fetch_single_dart_report, task_list)
                 for res in results:
                     if res is not None: res_dict[res[0]] = res[1]
@@ -439,7 +416,7 @@ def load_global_full_history_financials(code):
             raw_df = pd.DataFrame.from_dict(res_dict, orient='index').sort_index()
             pure_dict = {}
             
-            # 🎯 4분기 순수 차감 정규화 (연간 누적으로 인한 솟구침 완전 제거)
+            # 🎯 4분기 순수 차감 정규화 (솟구침 제거)
             for y_val in raw_df['year'].dropna().unique():
                 y_df = raw_df[raw_df['year'] == y_val].sort_values(by='q_num')
                 q1_row = y_df[y_df['q_num'] == 1]
@@ -746,15 +723,15 @@ try:
                     st.dataframe(dd_df, use_container_width=True)
 
         else:
-            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 복합 차트 (100% DART API 전용) ====================
+            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 복합 차트 ====================
             is_korean = str(selected_code).isdigit() and len(str(selected_code)) == 6
             source_lbl = "금융감독원 Open DART 전자공시" if is_korean else "미국 증권거래위원회 SEC EDGAR 공식 XBRL"
             unit_label = "억원" if is_korean else "Billion USD"
 
             st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 분기 실적(KPI) 오버레이 차트")
-            st.caption(f"사이드바 주기: **`{timeframe}`** | 선택 기간: **`{selected_period}`** | 출처: **`{source_lbl}`** (2015~현재 전 기간 100% DART 연동)")
+            st.caption(f"사이드바 주기: **`{timeframe}`** | 선택 기간: **`{selected_period}`** | 출처: **`{source_lbl}`**")
 
-            with st.spinner(f"{source_lbl}에서 전 기간 분기 실적 추출 중..."):
+            with st.spinner(f"{source_lbl}에서 분기 실적 추출 중..."):
                 raw_fin_df = load_global_full_history_financials(selected_code)
 
             if raw_fin_df.empty:
@@ -763,7 +740,7 @@ try:
                 synced_price_df = display_df
                 c_min, c_max = synced_price_df.index.min(), synced_price_df.index.max()
 
-                # 조회 기간 범위 내로 실적 데이터 완벽 필터링
+                # 조회 기간 범위 내로 실적 데이터 필터링
                 q_fin_df = raw_fin_df.loc[(raw_fin_df.index >= (c_min - datetime.timedelta(days=45))) & (raw_fin_df.index <= (c_max + datetime.timedelta(days=90)))].copy()
                 if q_fin_df.empty:
                     q_fin_df = raw_fin_df.copy()
