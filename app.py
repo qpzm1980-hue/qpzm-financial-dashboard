@@ -135,7 +135,7 @@ else:
     selected_code = direct_ticker
     currency_symbol = "원" if (direct_ticker.isdigit() or "KRW" in direct_ticker) else "USD"
 
-# ⏱️ 일봉(1년), 주봉(3년), 월봉(5년) 기본
+# ⏱️ 일봉: 1년, 주봉: 3년, 월봉: 5년 기본
 tf_config = {
     "일봉": {"default": "1년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1d"},
     "주봉": {"default": "3년", "options": ["6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1wk"},
@@ -183,7 +183,11 @@ def load_and_calculate_data(code, tf, period_str):
     except Exception: df = pd.DataFrame()
     if df.empty: return df
     if tf == "주봉": df = df.resample('W-FRI').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
-    elif tf == "월봉": df = df.resample('ME').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
+    elif tf == "월봉": 
+        try:
+            df = df.resample('ME').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
+        except Exception:
+            df = df.resample('M').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
 
     if 'Volume' not in df.columns: df['Volume'] = 0
     df['20선'] = df['Close'].rolling(20).mean()
@@ -278,7 +282,6 @@ def get_sec_cik_map():
 
 @st.cache_data(ttl=7200)
 def load_sec_edgar_10y_financials(ticker_symbol):
-    """SEC EDGAR 다중 태그 전수 병합으로 테슬라 및 미국 기업의 10+년 분기 실적 끊김 없이 복원"""
     t_clean = ticker_symbol.upper().strip()
     cik_map = get_sec_cik_map()
     cik = cik_map.get(t_clean)
@@ -293,7 +296,6 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                 cf = resp.json().get('facts', {}).get('us-gaap', {})
                 q_dict = {}
 
-                # 1. 다중 매출 태그 목록 (과거부터 최신까지 사용된 모든 태그 순회 병합)
                 rev_tags = [
                     'RevenueFromContractWithCustomerExcludingAssessedTax',
                     'SalesRevenueNet',
@@ -303,14 +305,12 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                     'AutomotiveRevenues'
                 ]
                 
-                # 2. 다중 순이익 태그 목록
                 net_tags = [
                     'NetIncomeLoss',
                     'ProfitLoss',
                     'NetIncomeLossAvailableToCommonStockholdersBasic'
                 ]
                 
-                # 3. 다중 영업이익 태그 목록
                 op_tags = [
                     'OperatingIncomeLoss'
                 ]
@@ -341,7 +341,6 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                                         dt_idx = pd.to_datetime(end_dt)
                                         if dt_idx not in q_dict:
                                             q_dict[dt_idx] = {}
-                                        # 이미 값이 없거나 더 최신 공시 형태일 때 덮어쓰기/보충
                                         if val_key not in q_dict[dt_idx] or pd.isna(q_dict[dt_idx][val_key]):
                                             q_dict[dt_idx][val_key] = val / 1_000_000_000
 
@@ -362,7 +361,6 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                     return df_sec.dropna(how='all')
         except Exception: pass
 
-    # 야후 파이낸스 폴백
     try:
         q_fin = yf.Ticker(ticker_symbol).quarterly_financials
         if q_fin is not None and not q_fin.empty:
@@ -434,6 +432,128 @@ def load_global_full_history_financials(code):
         return load_sec_edgar_10y_financials(code)
 
     return pd.DataFrame()
+
+# ==================== ⚡ 사용자 맞춤 조건 수급 돌파 스캐너 ====================
+@st.cache_data(ttl=300)
+def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
+    try:
+        today = datetime.date.today()
+        sample_hist = fdr.DataReader("005930", today - datetime.timedelta(days=15))
+        scan_date = sample_hist.index[-1].strftime('%Y-%m-%d') if (sample_hist is not None and not sample_hist.empty) else str(today)
+        df_krx = fdr.StockListing('KRX')
+        if df_krx.empty: return pd.DataFrame(), scan_date
+
+        amt_col = next((c for c in ['Amount', 'TradeValue', 'amount', 'VolumeValue'] if c in df_krx.columns), None)
+        if amt_col is None and 'Volume' in df_krx.columns and 'Close' in df_krx.columns:
+            df_krx['Estimated_Amount'] = df_krx['Volume'] * df_krx['Close']
+            amt_col = 'Estimated_Amount'
+        if amt_col is None: return pd.DataFrame(), scan_date
+
+        vol_col = 'Volume' if 'Volume' in df_krx.columns else None
+        targets = df_krx[df_krx[amt_col] >= threshold_won].copy()
+        if targets.empty: return pd.DataFrame(), scan_date
+
+        results = []
+        start_date = today - datetime.timedelta(days=int(lookback_days * 1.8) + 25)
+
+        for _, row in targets.iterrows():
+            code = str(row['Code']).zfill(6)
+            name = row['Name']
+            curr_amount = row[amt_col]
+            curr_vol = row[vol_col] if vol_col else 1.0
+            marcap_val = row.get('Marcap', 0)
+            if not is_valid_normal_stock(name, code, curr_vol, curr_amount): continue
+
+            try:
+                hist = fdr.DataReader(code, start_date)
+                if hist is not None and len(hist) >= min(10, lookback_days) and hist['Volume'].iloc[-1] > 0:
+                    amounts = hist['Amount'] if 'Amount' in hist.columns and hist['Amount'].iloc[-1] > 0 else hist['Close'] * hist['Volume']
+                    actual_lookback = min(lookback_days, len(amounts) - 1)
+                    prev_period_amounts = amounts.iloc[-(actual_lookback + 1):-1]
+                    max_period_amt = prev_period_amounts.max()
+                    avg_period_amt = prev_period_amounts.mean()
+                    yesterday_amt = prev_period_amounts.iloc[-1]
+
+                    if max_period_amt < threshold_won and curr_amount > yesterday_amt:
+                        curr_close = hist['Close'].iloc[-1]
+                        prev_close = hist['Close'].iloc[-2]
+                        real_chg_rate = ((curr_close - prev_close) / prev_close) * 100 if prev_close != 0 else 0.0
+                        if real_chg_rate >= min_chg_rate:
+                            surge_ratio = (curr_amount / avg_period_amt) * 100 if avg_period_amt > 0 else 999.0
+                            results.append({
+                                'Code': code, 'Name': name, 'Close': curr_close, 'ChgRate': real_chg_rate,
+                                '당일거래대금(억원)': round(curr_amount / 100_000_000, 1),
+                                '어제거래대금(억원)': round(yesterday_amt / 100_000_000, 1),
+                                f'{lookback_days}일평균(억원)': round(avg_period_amt / 100_000_000, 1),
+                                '수급폭증률': round(surge_ratio, 0), '시가총액(억원)': round(marcap_val / 100_000_000, 0),
+                                'Market': row.get('Market', 'KRX')
+                            })
+            except Exception: continue
+
+        if not results: return pd.DataFrame(), scan_date
+        return pd.DataFrame(results).sort_values(by='당일거래대금(억원)', ascending=False), scan_date
+    except Exception: return pd.DataFrame(), str(datetime.date.today())
+
+# ==================== 🧊 장기 초소외주 스캐너 ====================
+@st.cache_data(ttl=600)
+def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_eok):
+    try:
+        today = datetime.date.today()
+        sample_hist = fdr.DataReader("005930", today - datetime.timedelta(days=15))
+        scan_date = sample_hist.index[-1].strftime('%Y-%m-%d') if (sample_hist is not None and not sample_hist.empty) else str(today)
+        df_krx = fdr.StockListing('KRX')
+        if df_krx.empty: return pd.DataFrame(), scan_date
+
+        amt_col = next((c for c in ['Amount', 'TradeValue', 'amount', 'VolumeValue'] if c in df_krx.columns), None)
+        if amt_col is None and 'Volume' in df_krx.columns and 'Close' in df_krx.columns:
+            df_krx['Estimated_Amount'] = df_krx['Volume'] * df_krx['Close']
+            amt_col = 'Estimated_Amount'
+
+        vol_col = 'Volume' if 'Volume' in df_krx.columns else None
+        min_marcap_won = min_marcap_eok * 100_000_000
+        max_marcap_won = max_marcap_eok * 100_000_000
+        cands = df_krx[(df_krx[amt_col] < max_cap_won) & (df_krx['Marcap'] >= min_marcap_won) & (df_krx['Marcap'] <= max_marcap_won)].copy()
+        if cands.empty: return pd.DataFrame(), scan_date
+
+        results = []
+        start_date = today - datetime.timedelta(days=int(lookback_days * 1.8) + 30)
+        sample_cands = cands.sort_values(by='Marcap', ascending=False).head(150)
+
+        for _, row in sample_cands.iterrows():
+            code = str(row['Code']).zfill(6)
+            name = row['Name']
+            marcap_val = row.get('Marcap', 0)
+            curr_amt_krx = row[amt_col]
+            curr_vol_krx = row[vol_col] if vol_col else 1.0
+            if not is_valid_normal_stock(name, code, curr_vol_krx, curr_amt_krx): continue
+
+            try:
+                hist = fdr.DataReader(code, start_date)
+                if hist is not None and len(hist) >= min(60, int(lookback_days * 0.5)) and hist['Volume'].iloc[-1] > 0:
+                    amounts = hist['Amount'] if 'Amount' in hist.columns and hist['Amount'].iloc[-1] > 0 else hist['Close'] * hist['Volume']
+                    actual_lookback = min(lookback_days, len(amounts))
+                    period_amounts = amounts.iloc[-actual_lookback:]
+                    max_amt = period_amounts.max()
+                    avg_amt = period_amounts.mean()
+                    curr_amt = period_amounts.iloc[-1]
+
+                    if max_amt < max_cap_won:
+                        curr_close = hist['Close'].iloc[-1]
+                        prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else curr_close
+                        real_chg_rate = ((curr_close - prev_close) / prev_close) * 100 if prev_close != 0 else 0.0
+                        results.append({
+                            'Code': code, 'Name': name, 'Close': curr_close, 'ChgRate': real_chg_rate,
+                            f'{lookback_days}일최대거래대금(억원)': round(max_amt / 100_000_000, 1),
+                            f'{lookback_days}일평균거래대금(억원)': round(avg_amt / 100_000_000, 2),
+                            '당일거래대금(억원)': round(curr_amt / 100_000_000, 2),
+                            '시가총액(억원)': round(marcap_val / 100_000_000, 0),
+                            'Market': row.get('Market', 'KRX')
+                        })
+            except Exception: continue
+
+        if not results: return pd.DataFrame(), scan_date
+        return pd.DataFrame(results).sort_values(by=f'{lookback_days}일평균거래대금(억원)', ascending=True), scan_date
+    except Exception: return pd.DataFrame(), str(datetime.date.today())
 
 # ==================== 본문 렌더링 ====================
 try:
@@ -597,7 +717,8 @@ try:
                 if 'Revenue_Eok' in q_fin_df.columns and len(step_x) > 0:
                     fig_ts.add_trace(go.Scatter(x=step_x, y=step_rev, mode='lines', name=f'분기 매출액 ({unit_label})', line=dict(color='#26A69A', width=2.8)), secondary_y=True)
                     
-                    b_x, b_y, b_txt, b_col = [], [], []
+                    # 배지 라벨 (HTML 기반 안전 렌더링)
+                    b_x, b_y, b_txt = [], [], []
                     for idx_dt, row_data in q_fin_df.iterrows():
                         mid_dt = idx_dt + datetime.timedelta(days=45)
                         if c_min <= mid_dt <= (c_max + datetime.timedelta(days=45)):
@@ -606,11 +727,15 @@ try:
                             b_x.append(mid_dt)
                             b_y.append(row_data['Revenue_Eok'])
                             sign = "+" if yoy_val > 0 else ""
-                            b_txt.append(f"<b>{q_name}</b><br>{sign}{yoy_val:.1f}%" if pd.notna(yoy_val) else f"<b>{q_name}</b><br>{row_data['Revenue_Eok']:,.1f}")
-                            b_col.append('#26A69A' if (pd.notna(yoy_val) and yoy_val >= 0) else '#EF5350')
+                            color_tag = "#26A69A" if (pd.notna(yoy_val) and yoy_val >= 0) else "#EF5350"
+                            
+                            if pd.notna(yoy_val):
+                                b_txt.append(f"<span style='color:{color_tag}; font-weight:bold;'>{q_name}</span><br><span style='color:{color_tag};'>{sign}{yoy_val:.1f}%</span>")
+                            else:
+                                b_txt.append(f"<b>{q_name}</b><br>{row_data['Revenue_Eok']:,.1f}")
 
                     if b_x:
-                        fig_ts.add_trace(go.Scatter(x=b_x, y=b_y, mode='text', text=b_txt, textposition="top center", textfont=dict(size=10, color=b_col), showlegend=False), secondary_y=True)
+                        fig_ts.add_trace(go.Scatter(x=b_x, y=b_y, mode='text', text=b_txt, textposition="top center", showlegend=False), secondary_y=True)
 
                 if 'NetIncome_Eok' in q_fin_df.columns and len(step_x) > 0:
                     fig_ts.add_trace(go.Scatter(x=step_x, y=step_net, mode='lines', name=f'분기 순이익 ({unit_label})', line=dict(color='#FFB74D', width=2, dash='dot')), secondary_y=True)
@@ -622,6 +747,7 @@ try:
 
                 st.markdown("---")
                 
+                # 하단 차트
                 st.markdown(f"#### 📊 선택 기간({selected_period}) 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
                 kpi1, kpi2 = st.columns(2)
                 q_labels = [f"{d.year}-Q{(d.month-1)//3+1}" for d in q_fin_df.index]
@@ -646,7 +772,13 @@ try:
                 with st.expander(f"📋 선택 기간({selected_period}) 분기 실적 원본 데이터 확인"):
                     disp_t = q_fin_df.copy()
                     disp_t.index = [d.strftime('%Y-%m-%d') for d in disp_t.index]
-                    st.dataframe(disp_t.style.format({'Revenue_Eok': '{:,.2f}', 'OperatingIncome_Eok': '{:,.2f}', 'NetIncome_Eok': '{:,.2f}', 'Net_Margin': '{:.1f}%', 'Rev_YoY': '{:+.1f}%'}), use_container_width=True)
+                    # 안전한 문자열 포맷팅으로 직렬화 충돌 원천 방지
+                    for c_name in disp_t.columns:
+                        if c_name in ['Revenue_Eok', 'OperatingIncome_Eok', 'NetIncome_Eok']:
+                            disp_t[c_name] = disp_t[c_name].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "-")
+                        elif c_name in ['Net_Margin', 'Rev_YoY', 'Net_YoY']:
+                            disp_t[c_name] = disp_t[c_name].apply(lambda x: f"{x:+.1f}%" if pd.notna(x) else "-")
+                    st.dataframe(disp_t, use_container_width=True)
 
 except Exception as e:
     st.error(f"오류가 발생했습니다: {e}")
