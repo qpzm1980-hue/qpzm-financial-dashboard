@@ -361,7 +361,7 @@ period_map_yf = {
 }
 
 @st.cache_data(ttl=60)
-def load_and_calculate_data(code, tf, period_str, custom_start_date=None):
+def load_and_calculate_data(code, tf, period_str):
     interval = tf_config[tf]["interval"]
     yf_period = period_map_yf.get(period_str, "1y")
 
@@ -400,15 +400,9 @@ def load_and_calculate_data(code, tf, period_str, custom_start_date=None):
             df.index = df.index.tz_localize(None)
     else:
         today = datetime.date.today()
-        if custom_start_date is not None:
-            start_d = pd.to_datetime(custom_start_date) - datetime.timedelta(days=120)
-        elif tf == "월봉":
-            start_d = today - datetime.timedelta(days=365 * 25)
-        elif tf == "주봉":
-            start_d = today - datetime.timedelta(days=365 * 10)
-        else:
-            days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10, "최대(All)": 365*20}
-            start_d = today - datetime.timedelta(days=days_calc.get(period_str, 365) + 400)
+        days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10, "최대(All)": 365*20}
+        needed_days = days_calc.get(period_str, 365) + 300
+        start_d = today - datetime.timedelta(days=needed_days)
         
         try:
             df = fdr.DataReader(code, start_d)
@@ -448,11 +442,9 @@ def load_and_calculate_data(code, tf, period_str, custom_start_date=None):
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
     if "m" not in interval:
-        if custom_start_date is not None:
-            df = df.loc[df.index >= pd.to_datetime(custom_start_date)]
-        elif period_str != "최대(All)":
-            days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
-            disp_start = today - datetime.timedelta(days=days_calc.get(period_str, 365*5))
+        if period_str != "최대(All)":
+            days_disp = days_calc.get(period_str, 365)
+            disp_start = today - datetime.timedelta(days=days_disp)
             df = df.loc[df.index >= pd.to_datetime(disp_start)]
 
     return df
@@ -1336,14 +1328,14 @@ try:
                 st.info("💡 조건을 설정한 뒤 **[🧊 소외주 전수 스캔]** 버튼을 눌러주세요.")
 
         else:
-            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 실적-주가 복합 차트 (주기 완벽 연동) ====================
+            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 실적-주가 복합 차트 (주기 및 기간 완벽 반영) ====================
             st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 분기 실적(KPI) 오버레이 차트")
-            st.caption("100% 순수 분기 실적 데이터와 선택하신 차트 주기(일봉/주봉/월봉 등)를 1:1로 일치시켜 TrendSpider 정통 스타일로 시각화합니다.")
+            st.caption(f"사이드바에서 선택하신 **주기({timeframe})**와 **조회 기간({selected_period})**이 그대로 적용되며, 순수 분기 실적 데이터와 1:1로 결합됩니다.")
 
             is_korean_stock = str(selected_code).isdigit() and len(str(selected_code)) == 6
             data_source_name = "네이버 증권 & FnGuide 분기 데이터" if is_korean_stock else "Yahoo Finance 분기 데이터"
             
-            with st.spinner(f"{data_source_name}에서 순수 분기 실적 로드 및 주가 동기화 중..."):
+            with st.spinner(f"{data_source_name}에서 순수 분기 실적 로드 중..."):
                 q_fin_df = load_pure_quarterly_financials(selected_code)
 
             if q_fin_df.empty:
@@ -1351,18 +1343,15 @@ try:
             else:
                 unit_label = "억원" if is_korean_stock else "Billion USD"
                 
-                # 🎯 사이드바에서 선택된 주기(timeframe: 일봉/주봉/월봉 등)를 그대로 반영하여 주가 동기화
-                first_q_date = q_fin_df.index[0] - datetime.timedelta(days=90)
-                synced_price_df = load_and_calculate_data(selected_code, timeframe, selected_period, custom_start_date=first_q_date)
-                if synced_price_df.empty:
-                    synced_price_df = display_df
+                # 🎯 display_df(사이드바의 주기/기간 설정이 100% 적용된 주가 데이터)를 직접 사용하여 기간 불일치 해결
+                synced_price_df = display_df
 
                 # 1. 상단 TrendSpider 스타일 메인 차트
-                st.markdown(f"#### 📈 주가 & 분기 실적 스텝 오버레이 (현재 주기: `{timeframe}` | 데이터 출처: `{data_source_name}`)")
+                st.markdown(f"#### 📈 주가 & 분기 실적 스텝 오버레이 (현재 주기: `{timeframe}` | 기간: `{selected_period}` | 출처: `{data_source_name}`)")
                 
                 fig_ts = make_subplots(specs=[[{"secondary_y": True}]])
                 
-                # A. 기본 주가 라인 차트 (선택된 주기에 따른 시계열 반영)
+                # A. 기본 주가 라인 차트
                 fig_ts.add_trace(
                     go.Scatter(
                         x=synced_price_df.index,
@@ -1376,7 +1365,10 @@ try:
                     secondary_y=False
                 )
 
-                # B. 계단형 스텝 라인을 위한 분기 시작-종료 연결 시계열 생성
+                # B. 계단형 스텝 라인을 위한 분기 시작-종료 시계열 생성 (주가 차트 범위 내 필터링)
+                chart_min_date = synced_price_df.index.min()
+                chart_max_date = synced_price_df.index.max()
+
                 step_x = []
                 step_rev = []
                 step_net = []
@@ -1385,14 +1377,16 @@ try:
                     curr_dt = q_fin_df.index[i]
                     next_dt = q_fin_df.index[i+1] if (i+1 < len(q_fin_df)) else curr_dt + datetime.timedelta(days=90)
                     
-                    r_val = q_fin_df['Revenue_Eok'].iloc[i] if 'Revenue_Eok' in q_fin_df.columns else np.nan
-                    n_val = q_fin_df['NetIncome_Eok'].iloc[i] if 'NetIncome_Eok' in q_fin_df.columns else np.nan
-                    
-                    step_x.extend([curr_dt, next_dt])
-                    step_rev.extend([r_val, r_val])
-                    step_net.extend([n_val, n_val])
+                    # 주가 차트 기간과 겹치는 분기만 포함
+                    if next_dt >= chart_min_date and curr_dt <= chart_max_date + datetime.timedelta(days=90):
+                        r_val = q_fin_df['Revenue_Eok'].iloc[i] if 'Revenue_Eok' in q_fin_df.columns else np.nan
+                        n_val = q_fin_df['NetIncome_Eok'].iloc[i] if 'NetIncome_Eok' in q_fin_df.columns else np.nan
+                        
+                        step_x.extend([curr_dt, next_dt])
+                        step_rev.extend([r_val, r_val])
+                        step_net.extend([n_val, n_val])
 
-                if 'Revenue_Eok' in q_fin_df.columns:
+                if 'Revenue_Eok' in q_fin_df.columns and len(step_x) > 0:
                     fig_ts.add_trace(
                         go.Scatter(
                             x=step_x,
@@ -1404,41 +1398,45 @@ try:
                         secondary_y=True
                     )
 
+                    # TrendSpider 스타일 라벨 배지 생성
                     badge_x = []
                     badge_y = []
                     badge_texts = []
                     badge_colors = []
                     
                     for idx_dt, row_data in q_fin_df.iterrows():
-                        q_num = (idx_dt.month - 1) // 3 + 1
-                        q_name = f"Q{q_num}'{str(idx_dt.year)[-2:]}"
-                        yoy_val = row_data.get('Rev_YoY', np.nan)
-                        
-                        badge_x.append(idx_dt + datetime.timedelta(days=45))
-                        badge_y.append(row_data['Revenue_Eok'])
-                        
-                        if pd.notna(yoy_val):
-                            sign = "+" if yoy_val > 0 else ""
-                            badge_texts.append(f"<b>{q_name}</b><br>{sign}{yoy_val:.1f}%")
-                            badge_colors.append('#26A69A' if yoy_val >= 0 else '#EF5350')
-                        else:
-                            badge_texts.append(f"<b>{q_name}</b><br>{row_data['Revenue_Eok']:,.0f}{unit_label[0]}")
-                            badge_colors.append('#B2B5BE')
+                        mid_dt = idx_dt + datetime.timedelta(days=45)
+                        if chart_min_date <= mid_dt <= chart_max_date + datetime.timedelta(days=90):
+                            q_num = (idx_dt.month - 1) // 3 + 1
+                            q_name = f"Q{q_num}'{str(idx_dt.year)[-2:]}"
+                            yoy_val = row_data.get('Rev_YoY', np.nan)
+                            
+                            badge_x.append(mid_dt)
+                            badge_y.append(row_data['Revenue_Eok'])
+                            
+                            if pd.notna(yoy_val):
+                                sign = "+" if yoy_val > 0 else ""
+                                badge_texts.append(f"<b>{q_name}</b><br>{sign}{yoy_val:.1f}%")
+                                badge_colors.append('#26A69A' if yoy_val >= 0 else '#EF5350')
+                            else:
+                                badge_texts.append(f"<b>{q_name}</b><br>{row_data['Revenue_Eok']:,.0f}{unit_label[0]}")
+                                badge_colors.append('#B2B5BE')
 
-                    fig_ts.add_trace(
-                        go.Scatter(
-                            x=badge_x,
-                            y=badge_y,
-                            mode='text',
-                            text=badge_texts,
-                            textposition="top center",
-                            textfont=dict(size=10, color=badge_colors),
-                            showlegend=False
-                        ),
-                        secondary_y=True
-                    )
+                    if badge_x:
+                        fig_ts.add_trace(
+                            go.Scatter(
+                                x=badge_x,
+                                y=badge_y,
+                                mode='text',
+                                text=badge_texts,
+                                textposition="top center",
+                                textfont=dict(size=10, color=badge_colors),
+                                showlegend=False
+                            ),
+                            secondary_y=True
+                        )
 
-                if 'NetIncome_Eok' in q_fin_df.columns:
+                if 'NetIncome_Eok' in q_fin_df.columns and len(step_x) > 0:
                     fig_ts.add_trace(
                         go.Scatter(
                             x=step_x,
