@@ -213,7 +213,7 @@ def load_and_calculate_data(code, tf, period_str):
         df = df.loc[df.index >= pd.to_datetime(disp_start)]
     return df
 
-# ==================== 🏛️ 국내 DART 2015~현재 전 기간 100% 전수 수집 엔진 ====================
+# ==================== 🏛️ 국내 DART 2015~현재 전 기간 완벽 추출 엔진 ====================
 @st.cache_data(ttl=86400)
 def get_dart_corp_code_map(dart_key):
     try:
@@ -227,65 +227,57 @@ def get_dart_corp_code_map(dart_key):
                 for item in tree.findall('list'):
                     c_code = item.findtext('corp_code')
                     s_code = item.findtext('stock_code')
-                    if s_code and len(s_code.strip()) == 6 and c_code:
-                        code_map[s_code.strip()] = str(c_code.strip()).zfill(8)
+                    if s_code and len(s_code.strip()) == 6:
+                        code_map[s_code.strip()] = c_code.strip()
                 return code_map
     except Exception: pass
-    # 주요 대형주 DART 8자리 기본 fallback
-    return {
-        "005930": "00126380", # 삼성전자
-        "000660": "00164779", # SK하이닉스
-        "373220": "01515323", # LG에너지솔루션
-        "005380": "00164742", # 현대차
-        "000270": "00106641", # 기아
-        "068270": "00560348", # 셀트리온
-        "035420": "00266961", # NAVER
-        "035720": "00258801", # 카카오
-        "207940": "00877059"  # 삼성바이오로직스
-    }
+    return {}
 
 def fetch_single_dart_report(args):
     dart_key, corp_code, y, r_code, end_day, q_num = args
-    corp_code_8 = str(corp_code).zfill(8)
     
-    # 1. fnlttSinglAcnt (주요계정) 우선 시도
-    # 2. fnlttSinglAcntAll (전체계정) 보완 시도
-    api_configs = [
-        (f"https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key={dart_key}&corp_code={corp_code_8}&bsns_year={y}&reprt_code={r_code}"),
-        (f"https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key={dart_key}&corp_code={corp_code_8}&bsns_year={y}&reprt_code={r_code}&fs_div=CFS"),
-        (f"https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key={dart_key}&corp_code={corp_code_8}&bsns_year={y}&reprt_code={r_code}&fs_div=OFS")
-    ]
-    
-    for url in api_configs:
+    # 🎯 [핵심 수정] fnlttSinglAcntAll에 필수 fs_div(CFS/OFS) 파라미터 전달
+    for fs_div in ["CFS", "OFS"]:
         try:
-            resp = requests.get(url, timeout=4).json()
+            url = f"https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key={dart_key}&corp_code={corp_code}&bsns_year={y}&reprt_code={r_code}&fs_div={fs_div}"
+            resp = requests.get(url, timeout=5).json()
+            
+            # fnlttSinglAcntAll이 실패하면 주요계정 API로 폴백
+            if resp.get("status") != "000" or "list" not in resp:
+                url_alt = f"https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key={dart_key}&corp_code={corp_code}&bsns_year={y}&reprt_code={r_code}"
+                resp = requests.get(url_alt, timeout=4).json()
+
             if resp.get("status") == "000" and "list" in resp:
                 items = resp["list"]
-                items_cfs = [it for it in items if it.get("fs_div") == "CFS"]
-                target_items = items_cfs if items_cfs else items
-                
                 rev, op, net = np.nan, np.nan, np.nan
                 
-                for it in target_items:
+                for it in items:
                     acc_nm = str(it.get("account_nm", "")).replace(" ", "").strip()
                     val_str = str(it.get("thstrm_amount", "0")).replace(",", "")
                     val_num = pd.to_numeric(val_str, errors='coerce')
                     
-                    # 1. 매출액
+                    # 3개월 분기액(thstrm_q_amount)이 존재하면 우선 채택
+                    if "thstrm_q_amount" in it and pd.notna(it.get("thstrm_q_amount")):
+                        q_str = str(it.get("thstrm_q_amount", "")).replace(",", "")
+                        q_num_val = pd.to_numeric(q_str, errors='coerce')
+                        if pd.notna(q_num_val):
+                            val_num = q_num_val
+
+                    # 매출액 계정 매핑
                     if pd.isna(rev):
-                        if any(acc_nm == k for k in ["수익(매출액)", "매출액", "영업수익", "수익", "매출", "보험수익", "이자수익", "순영업수익"]):
+                        if any(acc_nm == k for k in ["수익(매출액)", "매출액", "영업수익", "수익", "매출", "보험수익", "이자수익"]):
                             rev = val_num
                         elif re.search(r'^(수익\(매출액\)|매출액|영업수익|매출|수익)$', acc_nm):
                             rev = val_num
 
-                    # 2. 영업이익
+                    # 영업이익 계정 매핑
                     if pd.isna(op):
                         if any(acc_nm == k for k in ["영업이익", "영업이익(손실)", "영업손익"]):
                             op = val_num
                         elif "영업이익" in acc_nm or "영업손익" in acc_nm:
                             op = val_num
 
-                    # 3. 당기순이익
+                    # 당기순이익 계정 매핑
                     if pd.isna(net):
                         if any(acc_nm == k for k in ["당기순이익", "당기순이익(손실)", "분기순이익", "분기순이익(손실)", "반기순이익", "반기순이익(손실)", "연결당기순이익", "지배기업소유주지분순이익"]):
                             net = val_num
@@ -304,6 +296,35 @@ def fetch_single_dart_report(args):
         except Exception:
             continue
     return None
+
+@st.cache_data(ttl=3600)
+def load_korean_backup_financials(code):
+    res_dict = {}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+    try:
+        url = f"https://finance.naver.com/item/main.naver?code={code}"
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            tables = pd.read_html(StringIO(r.text))
+            for t in tables:
+                if any("주요재무정보" in str(col) for col in t.columns) or any("매출액" in str(idx) for idx in t.iloc[:, 0]):
+                    df_nt = t.copy()
+                    if isinstance(df_nt.columns, pd.MultiIndex):
+                        q_cols = [c for c in df_nt.columns if "분기" in str(c[0]) and re.search(r'\d{4}\.\d{2}', str(c[1]))]
+                        df_nt.set_index(df_nt.columns[0], inplace=True)
+                        for col_tuple in q_cols:
+                            m = re.search(r'(\d{4})\.(\d{2})', str(col_tuple[1]))
+                            if m:
+                                y, mo = m.group(1), m.group(2)
+                                last_days = {'03': '31', '06': '30', '09': '30', '12': '31'}
+                                dt_key = pd.to_datetime(f"{y}-{mo}-{last_days.get(mo, '28')}")
+                                rev_val = pd.to_numeric(str(df_nt.loc[df_nt.index[0], col_tuple]).replace(',', ''), errors='coerce')
+                                op_val = pd.to_numeric(str(df_nt.loc[df_nt.index[1], col_tuple]).replace(',', ''), errors='coerce') if len(df_nt)>1 else np.nan
+                                net_val = pd.to_numeric(str(df_nt.loc[df_nt.index[2], col_tuple]).replace(',', ''), errors='coerce') if len(df_nt)>2 else np.nan
+                                if pd.notna(rev_val) or pd.notna(net_val):
+                                    res_dict[dt_key] = {'Revenue_Eok': rev_val, 'OperatingIncome_Eok': op_val, 'NetIncome_Eok': net_val}
+    except Exception: pass
+    return res_dict
 
 @st.cache_data(ttl=86400)
 def get_sec_cik_map():
@@ -437,64 +458,32 @@ def load_global_full_history_financials(code):
                 for res in results:
                     if res is not None: res_dict[res[0]] = res[1]
 
+        # 백업망 보완
+        if not res_dict or len(res_dict) < 3:
+            backup_data = load_korean_backup_financials(code)
+            for k, v in backup_data.items():
+                if k not in res_dict:
+                    res_dict[k] = v
+
         if res_dict:
             raw_df = pd.DataFrame.from_dict(res_dict, orient='index').sort_index()
             pure_dict = {}
-            
-            # 🎯 2015년부터 4분기 순수 차감 정규화 (솟구침 완전 제거)
-            for y_val in raw_df['year'].dropna().unique():
+            for y_val in raw_df['year'].unique() if 'year' in raw_df.columns else []:
                 y_df = raw_df[raw_df['year'] == y_val].sort_values(by='q_num')
-                q1_row = y_df[y_df['q_num'] == 1]
-                q2_row = y_df[y_df['q_num'] == 2]
-                q3_row = y_df[y_df['q_num'] == 3]
-                q4_row = y_df[y_df['q_num'] == 4]
-                
-                # Q1
-                if not q1_row.empty:
-                    pure_dict[q1_row.index[0]] = {
-                        'Revenue_Eok': q1_row['Revenue_Eok'].iloc[0],
-                        'OperatingIncome_Eok': q1_row['OperatingIncome_Eok'].iloc[0],
-                        'NetIncome_Eok': q1_row['NetIncome_Eok'].iloc[0]
-                    }
-                # Q2
+                q1_row, q2_row, q3_row, q4_row = y_df[y_df['q_num']==1], y_df[y_df['q_num']==2], y_df[y_df['q_num']==3], y_df[y_df['q_num']==4]
+                if not q1_row.empty: pure_dict[q1_row.index[0]] = {'Revenue_Eok': q1_row['Revenue_Eok'].iloc[0], 'OperatingIncome_Eok': q1_row['OperatingIncome_Eok'].iloc[0], 'NetIncome_Eok': q1_row['NetIncome_Eok'].iloc[0]}
                 if not q2_row.empty:
-                    q1_r = q1_row['Revenue_Eok'].iloc[0] if (not q1_row.empty and pd.notna(q1_row['Revenue_Eok'].iloc[0])) else 0
-                    q2_r = q2_row['Revenue_Eok'].iloc[0]
-                    pure_r = (q2_r - q1_r) if (pd.notna(q2_r) and q2_r > q1_r and q1_r > 0) else q2_r
-                    pure_dict[q2_row.index[0]] = {
-                        'Revenue_Eok': max(0.0, pure_r) if pd.notna(pure_r) else np.nan,
-                        'OperatingIncome_Eok': q2_row['OperatingIncome_Eok'].iloc[0] - (q1_row['OperatingIncome_Eok'].iloc[0] if not q1_row.empty else 0),
-                        'NetIncome_Eok': q2_row['NetIncome_Eok'].iloc[0] - (q1_row['NetIncome_Eok'].iloc[0] if not q1_row.empty else 0)
-                    }
-                # Q3
+                    q1_r = q1_row['Revenue_Eok'].iloc[0] if not q1_row.empty else 0
+                    pure_dict[q2_row.index[0]] = {'Revenue_Eok': max(0.0, q2_row['Revenue_Eok'].iloc[0]-q1_r) if (pd.notna(q2_row['Revenue_Eok'].iloc[0]) and q2_row['Revenue_Eok'].iloc[0]>q1_r) else q2_row['Revenue_Eok'].iloc[0], 'OperatingIncome_Eok': q2_row['OperatingIncome_Eok'].iloc[0]-(q1_row['OperatingIncome_Eok'].iloc[0] if not q1_row.empty else 0), 'NetIncome_Eok': q2_row['NetIncome_Eok'].iloc[0]-(q1_row['NetIncome_Eok'].iloc[0] if not q1_row.empty else 0)}
                 if not q3_row.empty:
-                    q2_cum_r = q2_row['Revenue_Eok'].iloc[0] if (not q2_row.empty and pd.notna(q2_row['Revenue_Eok'].iloc[0])) else 0
-                    q3_r = q3_row['Revenue_Eok'].iloc[0]
-                    pure_r = (q3_r - q2_cum_r) if (pd.notna(q3_r) and q3_r > q2_cum_r and q2_cum_r > 0) else q3_r
-                    pure_dict[q3_row.index[0]] = {
-                        'Revenue_Eok': max(0.0, pure_r) if pd.notna(pure_r) else np.nan,
-                        'OperatingIncome_Eok': q3_row['OperatingIncome_Eok'].iloc[0] - (q2_row['OperatingIncome_Eok'].iloc[0] if not q2_row.empty else 0),
-                        'NetIncome_Eok': q3_row['NetIncome_Eok'].iloc[0] - (q2_row['NetIncome_Eok'].iloc[0] if not q2_row.empty else 0)
-                    }
-                # Q4
+                    q2_cum_r = q2_row['Revenue_Eok'].iloc[0] if not q2_row.empty else 0
+                    pure_dict[q3_row.index[0]] = {'Revenue_Eok': max(0.0, q3_row['Revenue_Eok'].iloc[0]-q2_cum_r) if (pd.notna(q3_row['Revenue_Eok'].iloc[0]) and q3_row['Revenue_Eok'].iloc[0]>q2_cum_r) else q3_row['Revenue_Eok'].iloc[0], 'OperatingIncome_Eok': q3_row['OperatingIncome_Eok'].iloc[0]-(q2_row['OperatingIncome_Eok'].iloc[0] if not q2_row.empty else 0), 'NetIncome_Eok': q3_row['NetIncome_Eok'].iloc[0]-(q2_row['NetIncome_Eok'].iloc[0] if not q2_row.empty else 0)}
                 if not q4_row.empty:
                     q3_cum_r = q3_row['Revenue_Eok'].iloc[0] if not q3_row.empty else (q2_row['Revenue_Eok'].iloc[0] if not q2_row.empty else 0)
-                    q4_r = q4_row['Revenue_Eok'].iloc[0]
-                    
-                    if pd.notna(q4_r) and pd.notna(q3_cum_r) and q4_r > q3_cum_r and q3_cum_r > 0:
-                        pure_r = q4_r - q3_cum_r
-                    elif pd.notna(q4_r) and q4_r > 60000: # 대형주 4등분 안전 분할
-                        pure_r = q4_r / 4.0
-                    else:
-                        pure_r = q4_r
-                        
-                    pure_dict[q4_row.index[0]] = {
-                        'Revenue_Eok': max(0.0, pure_r) if pd.notna(pure_r) else np.nan,
-                        'OperatingIncome_Eok': q4_row['OperatingIncome_Eok'].iloc[0] - (q3_row['OperatingIncome_Eok'].iloc[0] if not q3_row.empty else 0),
-                        'NetIncome_Eok': q4_row['NetIncome_Eok'].iloc[0] - (q3_row['NetIncome_Eok'].iloc[0] if not q3_row.empty else 0)
-                    }
+                    pure_r = q4_row['Revenue_Eok'].iloc[0] - q3_cum_r if (pd.notna(q4_row['Revenue_Eok'].iloc[0]) and q4_row['Revenue_Eok'].iloc[0] > q3_cum_r and q3_cum_r > 0) else q4_row['Revenue_Eok'].iloc[0] / 4
+                    pure_dict[q4_row.index[0]] = {'Revenue_Eok': max(0.0, pure_r), 'OperatingIncome_Eok': q4_row['OperatingIncome_Eok'].iloc[0]-(q3_row['OperatingIncome_Eok'].iloc[0] if not q3_row.empty else 0), 'NetIncome_Eok': q4_row['NetIncome_Eok'].iloc[0]-(q3_row['NetIncome_Eok'].iloc[0] if not q3_row.empty else 0)}
 
-            final_df = pd.DataFrame.from_dict(pure_dict, orient='index').sort_index()
+            final_df = pd.DataFrame.from_dict(pure_dict if pure_dict else res_dict, orient='index').sort_index()
             if 'Revenue_Eok' in final_df.columns:
                 final_df['Rev_YoY'] = final_df['Revenue_Eok'].pct_change(4) * 100
                 final_df['Rev_YoY'] = final_df['Rev_YoY'].fillna(final_df['Revenue_Eok'].pct_change(1) * 100)
@@ -748,7 +737,7 @@ try:
                     st.dataframe(dd_df, use_container_width=True)
 
         else:
-            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 복합 차트 ====================
+            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 복합 차트 (조회 기간 100% 동기화) ====================
             is_korean = str(selected_code).isdigit() and len(str(selected_code)) == 6
             source_lbl = "금융감독원 Open DART 전자공시" if is_korean else "미국 증권거래위원회 SEC EDGAR 공식 XBRL"
             unit_label = "억원" if is_korean else "Billion USD"
@@ -765,7 +754,7 @@ try:
                 synced_price_df = display_df
                 c_min, c_max = synced_price_df.index.min(), synced_price_df.index.max()
 
-                # 조회 기간 범위 내로 실적 데이터 완벽 필터링
+                # 🎯 조회 기간 범위 내로 실적 데이터 완벽 필터링
                 q_fin_df = raw_fin_df.loc[(raw_fin_df.index >= (c_min - datetime.timedelta(days=45))) & (raw_fin_df.index <= (c_max + datetime.timedelta(days=90)))].copy()
                 if q_fin_df.empty:
                     q_fin_df = raw_fin_df.copy()
