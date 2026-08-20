@@ -45,10 +45,10 @@ def send_telegram_message(message: str) -> bool:
     except Exception: return False
 
 # ==================== 세션 상태 초기화 ====================
-if "category_radio" not in st.session_state: st.session_state["category_radio"] = "국내주식 (KRX)"
+if "category_radio" not in st.session_state: st.session_state["category_radio"] = "해외주식 (US Custom)"
 if "custom_stock_name" not in st.session_state: st.session_state["custom_stock_name"] = None
 if "custom_stock_code" not in st.session_state: st.session_state["custom_stock_code"] = None
-if "tab_selector" not in st.session_state: st.session_state["tab_selector"] = "📊 인터랙티브 종합 차트"
+if "tab_selector" not in st.session_state: st.session_state["tab_selector"] = "🏢 펀더멘털 & 실적-주가 복합 차트 (TrendSpider)"
 if "scan_results_df" not in st.session_state: st.session_state["scan_results_df"] = None
 if "scan_results_date" not in st.session_state: st.session_state["scan_results_date"] = None
 if "last_scanned_params" not in st.session_state: st.session_state["last_scanned_params"] = None
@@ -103,7 +103,8 @@ def get_us_stocks():
     return {
         "META - Meta Platforms": "META", "TSLA - Tesla": "TSLA", "AAPL - Apple": "AAPL",
         "GOOGL - Alphabet (Google)": "GOOGL", "AMZN - Amazon": "AMZN", "NVDA - NVIDIA": "NVDA",
-        "MSFT - Microsoft": "MSFT", "PLTR - Palantir Technologies": "PLTR", "AMD - Advanced Micro Devices": "AMD"
+        "MSFT - Microsoft": "MSFT", "PLTR - Palantir Technologies": "PLTR", "AMD - Advanced Micro Devices": "AMD",
+        "NFLX - Netflix": "NFLX", "INTC - Intel": "INTC", "CPNG - Coupang": "CPNG", "LLY - Eli Lilly": "LLY"
     }
 
 # 사이드바
@@ -129,7 +130,7 @@ if input_mode == "목록에서 선택":
     selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=options_list, index=selected_idx)
     selected_code = STOCKS[selected_name]
 else:
-    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: 005930, META, 284740)", value="284740").strip()
+    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: META, AAPL, 005930, 284740)", value="META").strip()
     selected_name = f"Custom: {direct_ticker}"
     selected_code = direct_ticker
     currency_symbol = "원" if (direct_ticker.isdigit() or "KRW" in direct_ticker) else "USD"
@@ -157,7 +158,7 @@ show_rsi = st.sidebar.checkbox("RSI (14)", value=True)
 show_macd = st.sidebar.checkbox("MACD (12, 26, 9)", value=True)
 
 if "DART_API_KEY" in st.secrets:
-    st.sidebar.success("🏛️ Open DART 전 기간(2015~현재) 연동 활성화")
+    st.sidebar.success("🏛️ DART & SEC EDGAR 10년 연동")
 
 if st.sidebar.button("🔄 최신 시세 강제 갱신"):
     st.cache_data.clear()
@@ -227,7 +228,7 @@ def load_and_calculate_data(code, tf, period_str):
         df = df.loc[df.index >= pd.to_datetime(disp_start)]
     return df
 
-# ==================== 🏛️ Open DART 2015년~현재 전 기간 분기 실적 전수 추출 ====================
+# ==================== 🏛️ 국내(DART) & 해외(SEC EDGAR) 10+년 분기 실적 로더 ====================
 @st.cache_data(ttl=86400)
 def get_dart_corp_code_map(dart_key):
     try:
@@ -279,109 +280,114 @@ def fetch_single_dart_report(args):
     except Exception: pass
     return None
 
-@st.cache_data(ttl=7200)
-def load_dart_full_history_quarterly_financials(code):
-    """2015년부터 현재까지 DART 전 기간 분기 실적 전수 수집 및 4분기 순수 차감 정규화"""
-    dart_key = st.secrets.get("DART_API_KEY", "").strip()
-    res_dict = {}
-    
-    if dart_key and str(code).isdigit() and len(str(code)) == 6:
-        corp_map = get_dart_corp_code_map(dart_key)
-        corp_code = corp_map.get(str(code).zfill(6))
-        
-        if corp_code:
-            curr_year = datetime.date.today().year
-            # 2015년부터 현재 연도까지 전체 생성 (최대 12개년)
-            years = list(range(2015, curr_year + 1))
-            reports = [("11013", "03-31", 1), ("11012", "06-30", 2), ("11014", "09-30", 3), ("11011", "12-31", 4)]
-            
-            task_list = []
-            for y in years:
-                for r_code, end_day, q_num in reports:
-                    task_list.append((dart_key, corp_code, y, r_code, end_day, q_num))
-                    
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                results = executor.map(fetch_single_dart_report, task_list)
-                
-            for res in results:
-                if res is not None:
-                    dt_key, data = res
-                    res_dict[dt_key] = data
-
-    # 4분기 솟구침 보정 및 순수 분기(3개월 단위) 정규화
-    if res_dict:
-        raw_df = pd.DataFrame.from_dict(res_dict, orient='index').sort_index()
-        pure_dict = {}
-        
-        for y_val in raw_df['year'].unique():
-            y_df = raw_df[raw_df['year'] == y_val].sort_values(by='q_num')
-            
-            q1_row = y_df[y_df['q_num'] == 1]
-            q2_row = y_df[y_df['q_num'] == 2]
-            q3_row = y_df[y_df['q_num'] == 3]
-            q4_row = y_df[y_df['q_num'] == 4]
-            
-            # Q1
-            if not q1_row.empty:
-                dt1 = q1_row.index[0]
-                pure_dict[dt1] = {
-                    'Revenue_Eok': q1_row['Revenue_Eok'].iloc[0],
-                    'OperatingIncome_Eok': q1_row['OperatingIncome_Eok'].iloc[0],
-                    'NetIncome_Eok': q1_row['NetIncome_Eok'].iloc[0]
-                }
-            # Q2 (반기 누적에서 1분기 차감)
-            if not q2_row.empty:
-                dt2 = q2_row.index[0]
-                q1_r = q1_row['Revenue_Eok'].iloc[0] if not q1_row.empty else 0
-                q1_o = q1_row['OperatingIncome_Eok'].iloc[0] if not q1_row.empty else 0
-                q1_n = q1_row['NetIncome_Eok'].iloc[0] if not q1_row.empty else 0
-                pure_dict[dt2] = {
-                    'Revenue_Eok': max(0.0, q2_row['Revenue_Eok'].iloc[0] - q1_r) if q2_row['Revenue_Eok'].iloc[0] > q1_r else q2_row['Revenue_Eok'].iloc[0],
-                    'OperatingIncome_Eok': q2_row['OperatingIncome_Eok'].iloc[0] - q1_o,
-                    'NetIncome_Eok': q2_row['NetIncome_Eok'].iloc[0] - q1_n
-                }
-            # Q3 (3분기 누적에서 반기 누적 차감)
-            if not q3_row.empty:
-                dt3 = q3_row.index[0]
-                q2_cum_r = q2_row['Revenue_Eok'].iloc[0] if not q2_row.empty else 0
-                q2_cum_o = q2_row['OperatingIncome_Eok'].iloc[0] if not q2_row.empty else 0
-                q2_cum_n = q2_row['NetIncome_Eok'].iloc[0] if not q2_row.empty else 0
-                pure_dict[dt3] = {
-                    'Revenue_Eok': max(0.0, q3_row['Revenue_Eok'].iloc[0] - q2_cum_r) if q3_row['Revenue_Eok'].iloc[0] > q2_cum_r else q3_row['Revenue_Eok'].iloc[0],
-                    'OperatingIncome_Eok': q3_row['OperatingIncome_Eok'].iloc[0] - q2_cum_o,
-                    'NetIncome_Eok': q3_row['NetIncome_Eok'].iloc[0] - q2_cum_n
-                }
-            # Q4 (연간 사업보고서에서 3분기 누적 차감 -> 4분기 솟구침 완벽 제거)
-            if not q4_row.empty:
-                dt4 = q4_row.index[0]
-                q3_cum_r = q3_row['Revenue_Eok'].iloc[0] if not q3_row.empty else (q2_row['Revenue_Eok'].iloc[0] if not q2_row.empty else 0)
-                q3_cum_o = q3_row['OperatingIncome_Eok'].iloc[0] if not q3_row.empty else (q2_row['OperatingIncome_Eok'].iloc[0] if not q2_row.empty else 0)
-                q3_cum_n = q3_row['NetIncome_Eok'].iloc[0] if not q3_row.empty else (q2_row['NetIncome_Eok'].iloc[0] if not q2_row.empty else 0)
-                
-                pure_r = q4_row['Revenue_Eok'].iloc[0] - q3_cum_r if (q4_row['Revenue_Eok'].iloc[0] > q3_cum_r and q3_cum_r > 0) else q4_row['Revenue_Eok'].iloc[0] / 4
-                pure_o = q4_row['OperatingIncome_Eok'].iloc[0] - q3_cum_o if q3_cum_o != 0 else q4_row['OperatingIncome_Eok'].iloc[0]
-                pure_n = q4_row['NetIncome_Eok'].iloc[0] - q3_cum_n if q3_cum_n != 0 else q4_row['NetIncome_Eok'].iloc[0]
-                
-                pure_dict[dt4] = {
-                    'Revenue_Eok': max(0.0, pure_r),
-                    'OperatingIncome_Eok': pure_o,
-                    'NetIncome_Eok': pure_n
-                }
-
-        final_df = pd.DataFrame.from_dict(pure_dict, orient='index').sort_index()
-        if 'Revenue_Eok' in final_df.columns:
-            final_df['Rev_YoY'] = final_df['Revenue_Eok'].pct_change(4) * 100
-            final_df['Rev_YoY'] = final_df['Rev_YoY'].fillna(final_df['Revenue_Eok'].pct_change(1) * 100)
-        if 'NetIncome_Eok' in final_df.columns:
-            final_df['Net_YoY'] = final_df['NetIncome_Eok'].pct_change(4) * 100
-            final_df['Net_YoY'] = final_df['NetIncome_Eok'].fillna(final_df['NetIncome_Eok'].pct_change(1) * 100)
-        if 'Revenue_Eok' in final_df.columns and 'NetIncome_Eok' in final_df.columns:
-            final_df['Net_Margin'] = (final_df['NetIncome_Eok'] / final_df['Revenue_Eok']) * 100
-        return final_df.dropna(how='all')
-
-    # 해외 주식 (미국) -> Yahoo Finance 분기 전체
+@st.cache_data(ttl=86400)
+def get_sec_cik_map():
+    """미국 SEC EDGAR 티커 -> CIK 매핑 로더"""
     try:
-        q_fin = yf.Ticker(code).quarterly_financials
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
+        r = requests.get('https://www.sec.gov/files/company_tickers.json', headers=headers, timeout=5)
+        if r.status_code == 200:
+            data = r.json()
+            return {v['ticker'].upper(): str(v['cik_str']) for v in data.values()}
+    except Exception: pass
+    # 주요 빅테크 기본 매핑
+    return {
+        "META": "1326801", "AAPL": "320193", "NVDA": "1045810", "TSLA": "1318605",
+        "MSFT": "789019", "AMZN": "1018724", "GOOGL": "1652044", "GOOG": "1652044",
+        "PLTR": "1321655", "AMD": "2488", "NFLX": "1065280", "INTC": "50863", "CPNG": "1834584", "LLY": "59478"
+    }
+
+@st.cache_data(ttl=7200)
+def load_sec_edgar_10y_financials(ticker_symbol):
+    """SEC EDGAR 공식 XBRL에서 미국 주식의 과거 10년+ 분기 실적(매출/영업이익/순이익) 전수 추출"""
+    t_clean = ticker_symbol.upper().strip()
+    cik_map = get_sec_cik_map()
+    cik = cik_map.get(t_clean)
+    
+    if cik:
+        try:
+            url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik.zfill(10)}.json"
+            headers = {'User-Agent': 'PersonalDashboardAdmin/2.0 (contact@investortool.com)'}
+            resp = requests.get(url, headers=headers, timeout=8)
+            
+            if resp.status_code == 200:
+                cf = resp.json().get('facts', {}).get('us-gaap', {})
+                
+                # 1. 매출액 태그 탐색
+                rev_tags = ['RevenueFromContractWithCustomerExcludingAssessedTax', 'SalesRevenueNet', 'Revenues', 'TotalRevenuesAndOtherIncome']
+                rev_data = None
+                for tag in rev_tags:
+                    if tag in cf and 'USD' in cf[tag].get('units', {}):
+                        rev_data = cf[tag]['units']['USD']
+                        break
+                        
+                # 2. 순이익 태그
+                net_tags = ['NetIncomeLoss', 'ProfitLoss', 'NetIncomeLossAvailableToCommonStockholdersBasic']
+                net_data = None
+                for tag in net_tags:
+                    if tag in cf and 'USD' in cf[tag].get('units', {}):
+                        net_data = cf[tag]['units']['USD']
+                        break
+                        
+                # 3. 영업이익 태그
+                op_tags = ['OperatingIncomeLoss']
+                op_data = None
+                for tag in op_tags:
+                    if tag in cf and 'USD' in cf[tag].get('units', {}):
+                        op_data = cf[tag]['units']['USD']
+                        break
+                        
+                q_dict = {}
+                
+                # 분기별 10-Q 및 10-K 파싱
+                def parse_series(data_list, val_key):
+                    if not data_list: return
+                    for item in data_list:
+                        form = item.get('form', '')
+                        fp = item.get('fp', '')
+                        end_dt = item.get('end', '')
+                        val = item.get('val', np.nan)
+                        
+                        # 분기 보고서(10-Q) 또는 10-K
+                        if form in ['10-Q', '10-K'] and end_dt:
+                            # 3개월 분기 실적 (또는 frame이 분기인 경우)
+                            start_dt = item.get('start', '')
+                            # 시작일과 종료일 차이가 60~110일 사이인 경우 = 3개월 분기 실적
+                            is_pure_quarter = False
+                            if start_dt and end_dt:
+                                try:
+                                    d_diff = (pd.to_datetime(end_dt) - pd.to_datetime(start_dt)).days
+                                    if 60 <= d_diff <= 110: is_pure_quarter = True
+                                except Exception: pass
+                            elif fp in ['Q1', 'Q2', 'Q3', 'Q4']:
+                                is_pure_quarter = True
+                                
+                            if is_pure_quarter and pd.notna(val):
+                                dt_idx = pd.to_datetime(end_dt)
+                                if dt_idx not in q_dict: q_dict[dt_idx] = {}
+                                q_dict[dt_idx][val_key] = val / 1_000_000_000 # Billion USD
+
+                parse_series(rev_data, 'Revenue_Eok')
+                parse_series(net_data, 'NetIncome_Eok')
+                parse_series(op_data, 'OperatingIncome_Eok')
+                
+                if q_dict:
+                    df_sec = pd.DataFrame.from_dict(q_dict, orient='index').sort_index()
+                    # 4분기 이상이면 YoY 및 마진율 계산
+                    if 'Revenue_Eok' in df_sec.columns:
+                        df_sec['Rev_YoY'] = df_sec['Revenue_Eok'].pct_change(4) * 100
+                        df_sec['Rev_YoY'] = df_sec['Rev_YoY'].fillna(df_sec['Revenue_Eok'].pct_change(1) * 100)
+                    if 'NetIncome_Eok' in df_sec.columns:
+                        df_sec['Net_YoY'] = df_sec['NetIncome_Eok'].pct_change(4) * 100
+                        df_sec['Net_YoY'] = df_sec['NetIncome_Eok'].fillna(df_sec['NetIncome_Eok'].pct_change(1) * 100)
+                    if 'Revenue_Eok' in df_sec.columns and 'NetIncome_Eok' in df_sec.columns:
+                        df_sec['Net_Margin'] = (df_sec['NetIncome_Eok'] / df_sec['Revenue_Eok']) * 100
+                    return df_sec.dropna(how='all')
+        except Exception: pass
+
+    # 야후 파이낸스 폴백
+    try:
+        q_fin = yf.Ticker(ticker_symbol).quarterly_financials
         if q_fin is not None and not q_fin.empty:
             q_df = q_fin.T.sort_index()
             q_df.index = pd.to_datetime(q_df.index)
@@ -398,6 +404,60 @@ def load_dart_full_history_quarterly_financials(code):
                 res['Net_Margin'] = (res['NetIncome_Eok'] / res['Revenue_Eok']) * 100
             return res.dropna(how='all')
     except Exception: pass
+    return pd.DataFrame()
+
+@st.cache_data(ttl=7200)
+def load_global_full_history_financials(code):
+    """국내(DART 2015~현재) 및 해외(SEC EDGAR 10+개년) 전수 실적 통합 분기 로더"""
+    is_korean = str(code).isdigit() and len(str(code)) == 6
+    if is_korean:
+        dart_key = st.secrets.get("DART_API_KEY", "").strip()
+        res_dict = {}
+        if dart_key:
+            corp_map = get_dart_corp_code_map(dart_key)
+            corp_code = corp_map.get(str(code).zfill(6))
+            if corp_code:
+                curr_year = datetime.date.today().year
+                years = list(range(2015, curr_year + 1))
+                reports = [("11013", "03-31", 1), ("11012", "06-30", 2), ("11014", "09-30", 3), ("11011", "12-31", 4)]
+                task_list = [(dart_key, corp_code, y, r_code, end_day, q_num) for y in years for r_code, end_day, q_num in reports]
+                with ThreadPoolExecutor(max_workers=10) as executor:
+                    results = executor.map(fetch_single_dart_report, task_list)
+                for res in results:
+                    if res is not None: res_dict[res[0]] = res[1]
+
+        if res_dict:
+            raw_df = pd.DataFrame.from_dict(res_dict, orient='index').sort_index()
+            pure_dict = {}
+            for y_val in raw_df['year'].unique():
+                y_df = raw_df[raw_df['year'] == y_val].sort_values(by='q_num')
+                q1_row, q2_row, q3_row, q4_row = y_df[y_df['q_num']==1], y_df[y_df['q_num']==2], y_df[y_df['q_num']==3], y_df[y_df['q_num']==4]
+                if not q1_row.empty: pure_dict[q1_row.index[0]] = {'Revenue_Eok': q1_row['Revenue_Eok'].iloc[0], 'OperatingIncome_Eok': q1_row['OperatingIncome_Eok'].iloc[0], 'NetIncome_Eok': q1_row['NetIncome_Eok'].iloc[0]}
+                if not q2_row.empty:
+                    q1_r = q1_row['Revenue_Eok'].iloc[0] if not q1_row.empty else 0
+                    pure_dict[q2_row.index[0]] = {'Revenue_Eok': max(0.0, q2_row['Revenue_Eok'].iloc[0]-q1_r) if q2_row['Revenue_Eok'].iloc[0]>q1_r else q2_row['Revenue_Eok'].iloc[0], 'OperatingIncome_Eok': q2_row['OperatingIncome_Eok'].iloc[0]-(q1_row['OperatingIncome_Eok'].iloc[0] if not q1_row.empty else 0), 'NetIncome_Eok': q2_row['NetIncome_Eok'].iloc[0]-(q1_row['NetIncome_Eok'].iloc[0] if not q1_row.empty else 0)}
+                if not q3_row.empty:
+                    q2_cum_r = q2_row['Revenue_Eok'].iloc[0] if not q2_row.empty else 0
+                    pure_dict[q3_row.index[0]] = {'Revenue_Eok': max(0.0, q3_row['Revenue_Eok'].iloc[0]-q2_cum_r) if q3_row['Revenue_Eok'].iloc[0]>q2_cum_r else q3_row['Revenue_Eok'].iloc[0], 'OperatingIncome_Eok': q3_row['OperatingIncome_Eok'].iloc[0]-(q2_row['OperatingIncome_Eok'].iloc[0] if not q2_row.empty else 0), 'NetIncome_Eok': q3_row['NetIncome_Eok'].iloc[0]-(q2_row['NetIncome_Eok'].iloc[0] if not q2_row.empty else 0)}
+                if not q4_row.empty:
+                    q3_cum_r = q3_row['Revenue_Eok'].iloc[0] if not q3_row.empty else (q2_row['Revenue_Eok'].iloc[0] if not q2_row.empty else 0)
+                    pure_r = q4_row['Revenue_Eok'].iloc[0] - q3_cum_r if (q4_row['Revenue_Eok'].iloc[0] > q3_cum_r and q3_cum_r > 0) else q4_row['Revenue_Eok'].iloc[0] / 4
+                    pure_dict[q4_row.index[0]] = {'Revenue_Eok': max(0.0, pure_r), 'OperatingIncome_Eok': q4_row['OperatingIncome_Eok'].iloc[0]-(q3_row['OperatingIncome_Eok'].iloc[0] if not q3_row.empty else 0), 'NetIncome_Eok': q4_row['NetIncome_Eok'].iloc[0]-(q3_row['NetIncome_Eok'].iloc[0] if not q3_row.empty else 0)}
+
+            final_df = pd.DataFrame.from_dict(pure_dict, orient='index').sort_index()
+            if 'Revenue_Eok' in final_df.columns:
+                final_df['Rev_YoY'] = final_df['Revenue_Eok'].pct_change(4) * 100
+                final_df['Rev_YoY'] = final_df['Rev_YoY'].fillna(final_df['Revenue_Eok'].pct_change(1) * 100)
+            if 'NetIncome_Eok' in final_df.columns:
+                final_df['Net_YoY'] = final_df['NetIncome_Eok'].pct_change(4) * 100
+                final_df['Net_YoY'] = final_df['NetIncome_Eok'].fillna(final_df['NetIncome_Eok'].pct_change(1) * 100)
+            if 'Revenue_Eok' in final_df.columns and 'NetIncome_Eok' in final_df.columns:
+                final_df['Net_Margin'] = (final_df['NetIncome_Eok'] / final_df['Revenue_Eok']) * 100
+            return final_df.dropna(how='all')
+    else:
+        # 해외 주식 (미국 주식) -> SEC EDGAR 10+년 호출
+        return load_sec_edgar_10y_financials(code)
+
     return pd.DataFrame()
 
 # ==================== 본문 렌더링 ====================
@@ -460,23 +520,23 @@ try:
                 st.plotly_chart(c_fig, use_container_width=True)
 
         else:
-            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 전 기간(2015~현재) 실적 복합 차트 ====================
-            st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 전 기간 분기 실적(KPI) 오버레이 차트")
-            st.caption(f"사이드바 주기: **`{timeframe}`** | 기간: **`{selected_period}`** | 공식 전자공시(Open DART) **2015년~현재 전 분기** 100% 순수 실적 연동")
-
+            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 10+개년 분기 실적 복합 차트 ====================
             is_korean = str(selected_code).isdigit() and len(str(selected_code)) == 6
-            source_lbl = "금융감독원 Open DART 전자공시 전 기간(2015~현재) 실적" if is_korean else "Yahoo Finance 분기 실적"
+            source_lbl = "금융감독원 Open DART 전자공시" if is_korean else "미국 증권거래위원회 SEC EDGAR 공식 XBRL"
+            unit_label = "억원" if is_korean else "Billion USD"
 
-            with st.spinner(f"{source_lbl} 로드 및 4분기 순수 실적 보정 중..."):
-                q_fin_df = load_dart_full_history_quarterly_financials(selected_code)
+            st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 전 기간(10+년) 분기 실적(KPI) 오버레이 차트")
+            st.caption(f"사이드바 주기: **`{timeframe}`** | 기간: **`{selected_period}`** | 출처: **`{source_lbl}`** (10+개년 100% 순수 분기 실적)")
+
+            with st.spinner(f"{source_lbl}에서 10+년 치 분기 실적 전수 수집 및 4분기 순수 실적 보정 중..."):
+                q_fin_df = load_global_full_history_financials(selected_code)
 
             if q_fin_df.empty:
-                st.warning(f"'{selected_name}'의 분기 실적 데이터를 가져올 수 없습니다. DART API Key를 확인하세요.")
+                st.warning(f"'{selected_name}'의 분기 실적 데이터를 가져올 수 없습니다. 종목 티커를 확인하세요.")
             else:
-                unit_label = "억원" if is_korean else "Billion USD"
                 synced_price_df = display_df
 
-                st.markdown(f"#### 📈 주가 & 분기 실적 스텝 오버레이 (출처: `{source_lbl}`)")
+                st.markdown(f"#### 📈 주가 & 10+년 분기 실적 스텝 오버레이 (출처: `{source_lbl}`)")
                 fig_ts = make_subplots(specs=[[{"secondary_y": True}]])
                 fig_ts.add_trace(go.Scatter(x=synced_price_df.index, y=synced_price_df['Close'], mode='lines', name=f'주가 ({timeframe})', line=dict(color='#29B6F6', width=2), fill='tozeroy', fillcolor='rgba(41, 182, 246, 0.04)'), secondary_y=False)
 
@@ -506,7 +566,7 @@ try:
                             b_x.append(mid_dt)
                             b_y.append(row_data['Revenue_Eok'])
                             sign = "+" if yoy_val > 0 else ""
-                            b_txt.append(f"<b>{q_name}</b><br>{sign}{yoy_val:.1f}%" if pd.notna(yoy_val) else f"<b>{q_name}</b><br>{row_data['Revenue_Eok']:,.0f}")
+                            b_txt.append(f"<b>{q_name}</b><br>{sign}{yoy_val:.1f}%" if pd.notna(yoy_val) else f"<b>{q_name}</b><br>{row_data['Revenue_Eok']:,.1f}")
                             b_col.append('#26A69A' if (pd.notna(yoy_val) and yoy_val >= 0) else '#EF5350')
 
                     if b_x:
@@ -521,7 +581,7 @@ try:
                 st.plotly_chart(fig_ts, use_container_width=True)
 
                 st.markdown("---")
-                st.markdown("#### 📊 전 기간 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
+                st.markdown("#### 📊 과거 10+년 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
                 kpi1, kpi2 = st.columns(2)
                 q_labels = [f"{d.year}-Q{(d.month-1)//3+1}" for d in q_fin_df.index]
 
@@ -530,7 +590,7 @@ try:
                     if 'Revenue_Eok' in q_fin_df.columns: fig_k1.add_trace(go.Bar(x=q_labels, y=q_fin_df['Revenue_Eok'], name=f'매출액', marker_color='#29B6F6'))
                     if 'OperatingIncome_Eok' in q_fin_df.columns: fig_k1.add_trace(go.Bar(x=q_labels, y=q_fin_df['OperatingIncome_Eok'], name=f'영업이익', marker_color='#26A69A'))
                     if 'NetIncome_Eok' in q_fin_df.columns: fig_k1.add_trace(go.Bar(x=q_labels, y=q_fin_df['NetIncome_Eok'], name=f'순이익', marker_color='#FFB74D'))
-                    fig_k1.update_layout(title=f"전 기간 분기별 매출/영업이익/순이익 ({unit_label})", height=360, barmode='group', template="plotly_dark", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", margin=dict(l=10, r=10, t=40, b=10))
+                    fig_k1.update_layout(title=f"10+년 분기별 매출/영업이익/순이익 ({unit_label})", height=360, barmode='group', template="plotly_dark", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", margin=dict(l=10, r=10, t=40, b=10))
                     st.plotly_chart(fig_k1, use_container_width=True)
 
                 with kpi2:
@@ -542,10 +602,10 @@ try:
                     fig_k2.update_layout(title="순이익률(%) 및 매출 YoY 성장률(%)", height=360, template="plotly_dark", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", margin=dict(l=10, r=10, t=40, b=10))
                     st.plotly_chart(fig_k2, use_container_width=True)
 
-                with st.expander("📋 전 기간 분기 실적 원본 데이터 확인"):
+                with st.expander("📋 10+년 분기 실적 원본 데이터 확인"):
                     disp_t = q_fin_df.copy()
                     disp_t.index = [d.strftime('%Y-%m-%d') for d in disp_t.index]
-                    st.dataframe(disp_t.style.format({'Revenue_Eok': '{:,.1f}', 'OperatingIncome_Eok': '{:,.1f}', 'NetIncome_Eok': '{:,.1f}', 'Net_Margin': '{:.1f}%', 'Rev_YoY': '{:+.1f}%'}), use_container_width=True)
+                    st.dataframe(disp_t.style.format({'Revenue_Eok': '{:,.2f}', 'OperatingIncome_Eok': '{:,.2f}', 'NetIncome_Eok': '{:,.2f}', 'Net_Margin': '{:.1f}%', 'Rev_YoY': '{:+.1f}%'}), use_container_width=True)
 
 except Exception as e:
     st.error(f"오류가 발생했습니다: {e}")
