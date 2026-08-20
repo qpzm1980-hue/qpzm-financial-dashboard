@@ -10,6 +10,7 @@ import urllib.request
 import urllib.parse
 import json
 import re
+import time
 
 # 페이지 설정
 st.set_page_config(page_title="글로벌 종합 금융 프로 터미널", layout="wide", initial_sidebar_state="expanded")
@@ -17,25 +18,20 @@ st.set_page_config(page_title="글로벌 종합 금융 프로 터미널", layout
 # ==================== 0. 정크 종목(거래정지/우선주/스팩/리츠/관리종목) 필터 함수 ====================
 def is_valid_normal_stock(name: str, code: str, curr_volume: float, curr_amount: float) -> bool:
     """거래정지, 상장폐지 절차, 스팩, 리츠, 우선주, 관리종목 등을 완벽 필터링"""
-    # 1) 거래량/거래대금이 0인 거래정지 종목 즉시 제외
     if curr_volume <= 0 or curr_amount <= 0:
         return False
     
-    # 2) 6자리 숫자가 아니거나 비정상 티커 제외
     if not (str(code).isdigit() and len(str(code)) == 6):
         return False
         
     name_clean = str(name).strip()
     
-    # 3) 스팩(SPAC), 리츠(REITs), ETN, 인프라 제외
     if any(keyword in name_clean for keyword in ["스팩", "기업인수목적", "리츠", "REIT", "인프라", "투융자"]):
         return False
         
-    # 4) 우선주 제외 (예: 삼성전자우, 현대차2우B 등)
     if re.search(r'(우|우B|우C|우\(전환\))$', name_clean):
         return False
         
-    # 5) 관리종목, 정리매매, 감리 등 특수 표시 제외
     if any(keyword in name_clean for keyword in ["(관리)", "(정매)", "(환기)", "정리매매"]):
         return False
         
@@ -177,45 +173,24 @@ def get_krx_stocks():
 # 2. 해외/미국 관심 종목 리스트
 def get_us_stocks():
     return {
+        "META - Meta Platforms": "META",
         "TSLA - Tesla": "TSLA",
         "AAPL - Apple": "AAPL",
         "GOOGL - Alphabet (Google)": "GOOGL",
         "AMZN - Amazon": "AMZN",
-        "META - Meta Platforms": "META",
-        "ORCL - Oracle": "ORCL",
+        "NVDA - NVIDIA": "NVDA",
+        "MSFT - Microsoft": "MSFT",
         "PLTR - Palantir Technologies": "PLTR",
         "AMD - Advanced Micro Devices": "AMD",
         "INTC - Intel": "INTC",
-        "DIS - Walt Disney": "DIS",
         "NFLX - Netflix": "NFLX",
         "CPNG - Coupang": "CPNG",
         "MSTR - MicroStrategy": "MSTR",
         "LLY - Eli Lilly": "LLY",
-        "NVO - Novo Nordisk": "NVO",
-        "UNH - UnitedHealth Group": "UNH",
         "GE - General Electric": "GE",
-        "GEV - GE Vernova": "GEV",
-        "LMT - Lockheed Martin": "LMT",
-        "OXY - Occidental Petroleum": "OXY",
-        "NOW - ServiceNow": "NOW",
-        "SNOW - Snowflake": "SNOW",
-        "ETN - Eaton Corporation": "ETN",
-        "PWR - Quanta Services": "PWR",
-        "HUBB - Hubbell Incorporated": "HUBB",
-        "CRDO - Credo Technology": "CRDO",
         "ASTS - AST SpaceMobile": "ASTS",
         "RKLB - Rocket Lab USA": "RKLB",
-        "RDW - Redwire": "RDW",
-        "LUNR - Intuitive Machines": "LUNR",
-        "JOBY - Joby Aviation": "JOBY",
-        "IREN - Iris Energy": "IREN",
-        "MP - MP Materials": "MP",
-        "BABA - Alibaba Group": "BABA",
-        "NIO - NIO Inc.": "NIO",
-        "BMNR - Biomea Fusion": "BMNR",
-        "CBRS - Centerspace": "CBRS",
-        "SNDK - Western Digital": "WDC",
-        "USAR - US Gold Corp": "USAU"
+        "BABA - Alibaba Group": "BABA"
     }
 
 # 3. 채권(Bonds) 리스트
@@ -319,7 +294,7 @@ if input_mode == "목록에서 선택":
     selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=options_list, index=selected_idx)
     selected_code = STOCKS[selected_name]
 else:
-    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: 005930, NVDA, USD/KRW, GC=F)", value="005930").strip()
+    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: 005930, META, 016800)", value="META").strip()
     selected_name = f"Custom: {direct_ticker}"
     selected_code = direct_ticker
     category = "직접입력"
@@ -330,8 +305,8 @@ tf_config = {
     "5분봉": {"default": "1일", "options": ["1일", "3일", "5일", "1개월", "2개월"], "interval": "5m"},
     "30분봉": {"default": "5일", "options": ["5일", "1개월", "2개월"], "interval": "30m"},
     "1시간봉": {"default": "1개월", "options": ["5일", "1개월", "2개월", "6개월"], "interval": "60m"},
-    "일봉": {"default": "6개월", "options": ["1달", "6개월", "1년", "3년", "5년", "10년"], "interval": "1d"},
-    "주봉": {"default": "1년", "options": ["6개월", "1년", "3년", "5년", "10년"], "interval": "1wk"},
+    "일봉": {"default": "1년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년"], "interval": "1d"},
+    "주봉": {"default": "3년", "options": ["6개월", "1년", "3년", "5년", "10년"], "interval": "1wk"},
     "월봉": {"default": "5년", "options": ["1년", "3년", "5년", "10년", "최대(All)"], "interval": "1mo"}
 }
 
@@ -478,16 +453,79 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
+# ==================== 🏢 분기 실적 데이터 로드 함수 (TrendSpider용) ====================
+@st.cache_data(ttl=3600)
+def load_quarterly_financials(code):
+    """국내/해외 종목의 분기별 매출액, 순이익, 영업이익 데이터를 추출하여 정리"""
+    try:
+        yf_ticker = code
+        if str(code).isdigit() and len(str(code)) == 6:
+            yf_ticker = f"{code}.KS"
+            
+        ticker = yf.Ticker(yf_ticker)
+        q_fin = ticker.quarterly_financials
+        
+        if (q_fin is None or q_fin.empty) and str(code).isdigit() and len(str(code)) == 6:
+            ticker = yf.Ticker(f"{code}.KQ")
+            q_fin = ticker.quarterly_financials
+            
+        if q_fin is None or q_fin.empty:
+            return pd.DataFrame()
+            
+        # 열(분기 날짜) 기준으로 정리 (과거 -> 최신 순)
+        q_df = q_fin.T
+        q_df.index = pd.to_datetime(q_df.index)
+        q_df = q_df.sort_index()
+
+        res = pd.DataFrame(index=q_df.index)
+        
+        # 1) 매출액 (Total Revenue)
+        for rev_col in ['Total Revenue', 'Operating Revenue', 'Revenue']:
+            if rev_col in q_df.columns:
+                res['Revenue'] = q_df[rev_col]
+                break
+                
+        # 2) 당기순이익 (Net Income)
+        for net_col in ['Net Income', 'Net Income Common Stockholders']:
+            if net_col in q_df.columns:
+                res['NetIncome'] = q_df[net_col]
+                break
+
+        # 3) 영업이익 (Operating Income)
+        for op_col in ['Operating Income', 'Operating Revenue']:
+            if op_col in q_df.columns:
+                res['OperatingIncome'] = q_df[op_col]
+                break
+
+        if 'Revenue' not in res.columns and 'NetIncome' not in res.columns:
+            return pd.DataFrame()
+            
+        # 전년 동기 대비 성장률(YoY) 계산 (4분기 전 대비)
+        if 'Revenue' in res.columns and len(res) >= 5:
+            res['Rev_YoY'] = res['Revenue'].pct_change(4) * 100
+        else:
+            res['Rev_YoY'] = np.nan
+            
+        if 'NetIncome' in res.columns and len(res) >= 5:
+            res['Net_YoY'] = res['NetIncome'].pct_change(4) * 100
+        else:
+            res['Net_YoY'] = np.nan
+
+        # 순이익률 (%)
+        if 'Revenue' in res.columns and 'NetIncome' in res.columns:
+            res['Net_Margin'] = (res['NetIncome'] / res['Revenue']) * 100
+
+        return res.dropna(how='all')
+    except Exception:
+        return pd.DataFrame()
+
 # ==================== ⚡ 사용자 맞춤 조건 수급 돌파 스캐너 (클린 필터 적용) ====================
 @st.cache_data(ttl=300)
 def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
     try:
         today = datetime.date.today()
         sample_hist = fdr.DataReader("005930", today - datetime.timedelta(days=15))
-        if sample_hist is None or sample_hist.empty:
-            scan_date = today.strftime('%Y-%m-%d')
-        else:
-            scan_date = sample_hist.index[-1].strftime('%Y-%m-%d')
+        scan_date = sample_hist.index[-1].strftime('%Y-%m-%d') if (sample_hist is not None and not sample_hist.empty) else str(today)
 
         df_krx = fdr.StockListing('KRX')
         if df_krx.empty:
@@ -508,7 +546,6 @@ def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
 
         vol_col = 'Volume' if 'Volume' in df_krx.columns else None
 
-        # ⚡ 1차 필터링: 당일 거래대금 기준치 이상 유입 종목 추출
         targets = df_krx[df_krx[amt_col] >= threshold_won].copy()
 
         if targets.empty:
@@ -525,14 +562,12 @@ def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
             curr_vol = row[vol_col] if vol_col else 1.0
             marcap_val = row.get('Marcap', 0)
 
-            # 🛡️ 1차 클린 필터링: 거래정지, 스팩, 리츠, 우선주, 관리종목 제외
             if not is_valid_normal_stock(name, code, curr_vol, curr_amount):
                 continue
 
             try:
                 hist = fdr.DataReader(code, start_date)
                 if hist is not None and len(hist) >= min(10, lookback_days):
-                    # 🛡️ 최근 거래정지 이력(최근 3일 내 거래량 0) 검사
                     if hist['Volume'].iloc[-1] <= 0:
                         continue
 
@@ -627,14 +662,12 @@ def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_e
             curr_amt_krx = row[amt_col]
             curr_vol_krx = row[vol_col] if vol_col else 1.0
 
-            # 🛡️ 1차 클린 필터링: 거래정지, 스팩, 리츠, 우선주, 관리종목 제외
             if not is_valid_normal_stock(name, code, curr_vol_krx, curr_amt_krx):
                 continue
 
             try:
                 hist = fdr.DataReader(code, start_date)
                 if hist is not None and len(hist) >= min(60, int(lookback_days * 0.5)):
-                    # 🛡️ 최근 당일 거래정지 여부 검증
                     if hist['Volume'].iloc[-1] <= 0:
                         continue
 
@@ -649,7 +682,6 @@ def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_e
                     avg_amt = period_amounts.mean()
                     curr_amt = period_amounts.iloc[-1]
 
-                    # 🎯 N일간 단 하루도 상한선을 넘지 않은 종목
                     if max_amt < max_cap_won:
                         curr_close = hist['Close'].iloc[-1]
                         prev_close = hist['Close'].iloc[-2] if len(hist) > 1 else curr_close
@@ -764,11 +796,13 @@ try:
 
         st.markdown("---")
         
+        # 5개 탭 구조 (TrendSpider 펀더멘털 오버레이 탭 추가)
         tab_titles = [
             "📊 인터랙티브 종합 차트", 
             "📈 벤치마크 상대 수익률(%) 비교", 
             "🔥 맞춤 조건 수급 폭발 스캐너",
-            "🧊 장기 초소외주 (1년 거래대금 100억 미만) 탐색기"
+            "🧊 장기 초소외주 (1년 거래대금 100억 미만) 탐색기",
+            "🏢 펀더멘털 & 실적-주가 복합 차트 (TrendSpider)"
         ]
         
         active_tab = st.radio(
@@ -939,7 +973,7 @@ try:
                 st.error(f"수익률 비교 중 오류: {e}")
 
         elif active_tab == "🔥 맞춤 조건 수급 폭발 스캐너":
-            # ==================== 🔥 사용자 직접 입력 + 검색 버튼 스캐너 화면 ====================
+            # ==================== 🔥 수급 폭발 스캐너 ====================
             st.markdown("### 🔥 맞춤 조건 수급 폭발 주도주 실시간 스캐너")
             st.caption("🛡️ 거래정지, 상장폐지, 관리/환기종목, 우선주, 스팩, 리츠는 자동으로 완벽 제외됩니다.")
             
@@ -953,8 +987,7 @@ try:
                         min_value=1,
                         max_value=365,
                         value=20,
-                        step=5,
-                        help="지정된 일수 동안 기준금액을 한 번도 넘긴 적이 없어야 합니다."
+                        step=5
                     )
                 with p_col2:
                     input_threshold_eok = st.number_input(
@@ -962,8 +995,7 @@ try:
                         min_value=10,
                         max_value=10000,
                         value=500,
-                        step=50,
-                        help="당일 처음으로 이 금액 이상 터진 종목을 검색합니다."
+                        step=50
                     )
                 with p_col3:
                     input_min_chg = st.selectbox(
@@ -997,20 +1029,39 @@ try:
 
                 st.markdown("---")
                 
-                head_col1, head_col2 = st.columns([4, 1.2])
+                head_col1, head_col2 = st.columns([4, 1.3])
                 with head_col1:
                     if scan_date:
                         st.caption(f"📅 **분석 기준 거래일자:** `{scan_date}` | **적용 조건:** 직전 `{p['lookback']}일`간 `{p['threshold']:,}억` 미만 $\\rightarrow$ 당일 `{p['threshold']:,}억` 첫 돌파")
                 with head_col2:
                     if not surge_data.empty:
-                        if st.button("📲 텔레그램으로 전체 결과 전송", use_container_width=True):
-                            lines = [f"🚨 *[QPZM 수급 첫 폭발 감지]*", f"📅 기준일: `{scan_date}`", f"🎯 조건: {p['lookback']}일 잠복 $\\rightarrow$ {p['threshold']:,}억 돌파\n"]
-                            for _, r in surge_data.head(5).iterrows():
-                                lines.append(f"• *{r['Name']}* (`{r['Code']}`): {r['Close']:,.0f}원 ({r['ChgRate']:+.2f}%) | 대금: *{r['당일거래대금(억원)']}억* (폭증 {r['수급폭증률']:,.0f}%)")
-                            if send_telegram_message("\n".join(lines)):
-                                st.toast("텔레그램으로 알림을 전송했습니다!", icon="🚀")
+                        if st.button("📲 텔레그램 전체 전송", key="btn_send_surge_all", use_container_width=True):
+                            total_cnt = len(surge_data)
+                            chunk_size = 20
+                            sent_ok = True
+                            
+                            for start_idx in range(0, total_cnt, chunk_size):
+                                end_idx = min(start_idx + chunk_size, total_cnt)
+                                page_no = (start_idx // chunk_size) + 1
+                                total_pages = ((total_cnt - 1) // chunk_size) + 1
+                                
+                                lines = [
+                                    f"🚨 *[QPZM 수급 폭발 종목]* ({page_no}/{total_pages})",
+                                    f"📅 기준일: `{scan_date}` | 총 {total_cnt}개 중 {start_idx+1}~{end_idx}번째",
+                                    f"🎯 조건: {p['lookback']}일 잠복 $\\rightarrow$ {p['threshold']:,}억 첫 돌파\n"
+                                ]
+                                
+                                for rank, (_, r) in enumerate(surge_data.iloc[start_idx:end_idx].iterrows(), start=start_idx+1):
+                                    lines.append(f"{rank}. *{r['Name']}* (`{r['Code']}`): {r['Close']:,.0f}원 ({r['ChgRate']:+.2f}%) | 거래대금: *{r['당일거래대금(억원)']}억* (폭증 {r['수급폭증률']:,.0f}%)")
+                                
+                                if not send_telegram_message("\n".join(lines)):
+                                    sent_ok = False
+                                time.sleep(0.3)
+                                
+                            if sent_ok:
+                                st.toast(f"텔레그램으로 전체 {total_cnt}개 종목 알림을 전송했습니다!", icon="🚀")
                             else:
-                                st.error("텔레그램 전송 실패")
+                                st.error("일부 메시지 전송 실패 (토큰 및 채팅방 상태를 확인하세요)")
 
                 if not surge_data.empty:
                     st.success(f"조건을 만족한 주도주 **{len(surge_data)}개**가 포착되었습니다!")
@@ -1061,12 +1112,12 @@ try:
                                 )
                             st.markdown("---")
                 else:
-                    st.warning(f"기준일({scan_date})에 직전 {p['lookback']}일간 {p['threshold']:,}억 미만 $\\rightarrow$ 당일 {p['threshold']:,}억 첫 돌파 조건을 만족하는 종목이 없습니다. 조건을 조정한 후 다시 검색해 보세요.")
+                    st.warning(f"기준일({scan_date})에 조건을 만족하는 종목이 없습니다. 조건을 조정한 후 다시 검색해 보세요.")
             else:
-                st.info("💡 원하는 **과거 잠복 거래일수**와 **돌파 거래대금(억원)**을 입력한 후 **[🔍 조건 검색 실행]** 버튼을 눌러주세요.")
+                st.info("💡 원하는 조건을 입력한 후 **[🔍 조건 검색 실행]** 버튼을 눌러주세요.")
 
-        else:
-            # ==================== 🧊 장기 초소외주 탐색기 화면 ====================
+        elif active_tab == "🧊 장기 초소외주 (1년 거래대금 100억 미만) 탐색기":
+            # ==================== 🧊 장기 초소외주 탐색기 ====================
             st.markdown("### 🧊 장기 초소외주 / 품절주 전수 탐색기")
             st.caption("🛡️ 거래정지, 상장폐지, 관리/환기종목, 우선주, 스팩, 리츠는 자동으로 완벽 제외됩니다.")
             
@@ -1077,7 +1128,7 @@ try:
                 with d_col1:
                     d_lookback = st.number_input("📅 추적 기간 (일수)", min_value=30, max_value=500, value=365, step=30)
                 with d_col2:
-                    d_max_amt = st.number_input("🚫 최대 거래대금 상한선 (억원)", min_value=1, max_value=500, value=100, step=10, help="이 기간 동안 단 하루도 이 금액을 넘지 않은 종목만 추출합니다.")
+                    d_max_amt = st.number_input("🚫 최대 거래대금 상한선 (억원)", min_value=1, max_value=500, value=100, step=10)
                 with d_col3:
                     d_min_marcap = st.number_input("💵 최소 시가총액 (억원)", min_value=50, max_value=5000, value=300, step=50)
                 with d_col4:
@@ -1109,23 +1160,42 @@ try:
 
                 st.markdown("---")
                 
-                dhead_col1, dhead_col2 = st.columns([4, 1.2])
+                dhead_col1, dhead_col2 = st.columns([4, 1.3])
                 with dhead_col1:
                     if d_date:
                         st.caption(f"📅 **기준일자:** `{d_date}` | **조건:** 최근 `{dp['lookback']}일`간 일간 최대 거래대금 `{dp['max_amt']:,}억 원 미만` & 시총 `{dp['min_marcap']}억 ~ {dp['max_marcap']:,}억 원`")
                 with dhead_col2:
                     if not d_data.empty:
-                        if st.button("📲 소외주 Top5 텔레그램 전송", use_container_width=True):
-                            lines = [f"🧊 *[QPZM 1년 초소외주 목록]*", f"📅 기준일: `{d_date}`", f"🎯 조건: {dp['lookback']}일간 최대 거래대금 {dp['max_amt']}억 미만\n"]
-                            for _, r in d_data.head(5).iterrows():
-                                lines.append(f"• *{r['Name']}* (`{r['Code']}`): {r['Close']:,.0f}원 | 일평균: *{r[avg_col]}억* | 시총 {r['시가총액(억원)']:,}억")
-                            if send_telegram_message("\n".join(lines)):
-                                st.toast("텔레그램으로 소외주 목록을 전송했습니다!", icon="🚀")
+                        if st.button("📲 소외주 전체 텔레그램 전송", key="btn_send_dormant_all", use_container_width=True):
+                            total_cnt = len(d_data)
+                            chunk_size = 20
+                            sent_ok = True
+                            
+                            for start_idx in range(0, total_cnt, chunk_size):
+                                end_idx = min(start_idx + chunk_size, total_cnt)
+                                page_no = (start_idx // chunk_size) + 1
+                                total_pages = ((total_cnt - 1) // chunk_size) + 1
+                                
+                                lines = [
+                                    f"🧊 *[QPZM 장기 초소외주 목록]* ({page_no}/{total_pages})",
+                                    f"📅 기준일: `{d_date}` | 총 {total_cnt}개 중 {start_idx+1}~{end_idx}번째",
+                                    f"🎯 조건: {dp['lookback']}일간 최대 거래대금 {dp['max_amt']}억 미만\n"
+                                ]
+                                
+                                for rank, (_, r) in enumerate(d_data.iloc[start_idx:end_idx].iterrows(), start=start_idx+1):
+                                    lines.append(f"{rank}. *{r['Name']}* (`{r['Code']}`): {r['Close']:,.0f}원 | 일평균: *{r[avg_col]}억* | 시총 {r['시가총액(억원)']:,}억")
+                                
+                                if not send_telegram_message("\n".join(lines)):
+                                    sent_ok = False
+                                time.sleep(0.3)
+                                
+                            if sent_ok:
+                                st.toast(f"텔레그램으로 전체 {total_cnt}개 소외주 목록을 전송했습니다!", icon="🚀")
                             else:
-                                st.error("텔레그램 전송 실패")
+                                st.error("일부 메시지 전송 실패")
 
                 if not d_data.empty:
-                    st.success(f"최근 {dp['lookback']}일간 거래대금 {dp['max_amt']:,}억을 넘지 않은 초소외주 **{len(d_data)}개**가 발굴되었습니다! (평균 거래대금 적은 순 정렬)")
+                    st.success(f"최근 {dp['lookback']}일간 거래대금 {dp['max_amt']:,}억을 넘지 않은 초소외주 **{len(d_data)}개**가 발굴되었습니다!")
                     
                     st.dataframe(
                         d_data.style.format({
@@ -1140,7 +1210,7 @@ try:
                     )
                     
                     st.markdown("---")
-                    st.markdown("#### 🎯 발굴 종목 차트 확인 (이평선 밀집/장기 횡보 확인)")
+                    st.markdown("#### 🎯 발굴 종목 차트 확인")
                     
                     for idx, r in d_data.iterrows():
                         c_code = r['Code']
@@ -1170,9 +1240,180 @@ try:
                                 )
                             st.markdown("---")
                 else:
-                    st.warning("설정된 조건에 해당하는 종목이 없습니다. 시가총액 범위나 거래대금 상한선을 조절해 보세요.")
+                    st.warning("조건에 해당하는 종목이 없습니다.")
             else:
-                st.info("💡 **추적 기간(일수)**과 **최대 거래대금 상한선(억원)**을 설정한 뒤 **[🧊 소외주 전수 스캔]** 버튼을 눌러주세요.")
+                st.info("💡 조건을 설정한 뒤 **[🧊 소외주 전수 스캔]** 버튼을 눌러주세요.")
+
+        else:
+            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 실적-주가 복합 차트 ====================
+            st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 분기 실적(KPI) 오버레이 차트")
+            st.caption("주가 캔들/라인과 분기별 매출액, 순이익, 성장률(YoY)을 TrendSpider 스타일로 결합하여 펀더멘털과 주가의 상관관계를 분석합니다.")
+
+            with st.spinner("분기별 재무 실적(매출액, 순이익, 영업이익) 데이터 불러오는 중..."):
+                q_fin_df = load_quarterly_financials(selected_code)
+
+            if q_fin_df.empty:
+                st.warning(f"'{selected_name}' 종목의 분기 재무제표 데이터를 가져올 수 없습니다. (지수/환율/원자재/코인이거나 실적 미제공 종목일 수 있습니다)")
+            else:
+                # 1. 상단 TrendSpider 스타일 메인 차트 (주가 라인 + 분기 매출액/순이익 오버레이)
+                st.markdown("#### 📈 주가 & 분기 실적 스텝 오버레이 (TrendSpider)")
+                
+                fig_ts = make_subplots(specs=[[{"secondary_y": True}]])
+                
+                # A. 기본 주가 라인/영역 차트
+                fig_ts.add_trace(
+                    go.Scatter(
+                        x=display_df.index,
+                        y=display_df['Close'],
+                        mode='lines',
+                        name='주가 (Close)',
+                        line=dict(color='#29B6F6', width=2),
+                        fill='tozeroy',
+                        fillcolor='rgba(41, 182, 246, 0.05)'
+                    ),
+                    secondary_y=False
+                )
+
+                # B. 분기 매출액 (우측 축 - 계단식 스텝 라인 또는 바)
+                unit_label = "억원" if category == "국내주식 (KRX)" or selected_code.isdigit() else "Billion USD"
+                scale_div = 100_000_000 if category == "국내주식 (KRX)" or selected_code.isdigit() else 1_000_000_000
+
+                if 'Revenue' in q_fin_df.columns:
+                    scaled_rev = q_fin_df['Revenue'] / scale_div
+                    fig_ts.add_trace(
+                        go.Scatter(
+                            x=q_fin_df.index,
+                            y=scaled_rev,
+                            mode='lines+markers+text',
+                            name=f'분기 매출액 ({unit_label})',
+                            line=dict(color='#26A69A', width=2.5, shape='hv'),  # TrendSpider 스타일 계단형 스텝
+                            marker=dict(size=8, symbol='diamond', color='#26A69A'),
+                            text=[f"{v:,.1f}" for v in scaled_rev],
+                            textposition="top center",
+                            textfont=dict(size=10, color="#26A69A")
+                        ),
+                        secondary_y=True
+                    )
+
+                if 'NetIncome' in q_fin_df.columns:
+                    scaled_net = q_fin_df['NetIncome'] / scale_div
+                    fig_ts.add_trace(
+                        go.Scatter(
+                            x=q_fin_df.index,
+                            y=scaled_net,
+                            mode='lines+markers',
+                            name=f'분기 순이익 ({unit_label})',
+                            line=dict(color='#FFB74D', width=2, dash='dot', shape='hv'),
+                            marker=dict(size=6, color='#FFB74D')
+                        ),
+                        secondary_y=True
+                    )
+
+                fig_ts.update_layout(
+                    height=560,
+                    template="plotly_dark",
+                    paper_bgcolor="#0E1117",
+                    plot_bgcolor="#0E1117",
+                    hovermode='x unified',
+                    margin=dict(l=10, r=10, t=30, b=10),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                fig_ts.update_yaxes(title_text=f"주가 ({currency_symbol})", secondary_y=False, showgrid=True, gridcolor="#2A2E39")
+                fig_ts.update_yaxes(title_text=f"실적 ({unit_label})", secondary_y=True, showgrid=False)
+
+                st.plotly_chart(fig_ts, use_container_width=True)
+
+                st.markdown("---")
+
+                # 2. 하단 펀더멘털 Segments & KPIs 차트
+                st.markdown("#### 📊 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
+                kpi_col1, kpi_col2 = st.columns(2)
+
+                with kpi_col1:
+                    # 매출액 & 영업이익 막대 콤보
+                    fig_kpi1 = go.Figure()
+                    if 'Revenue' in q_fin_df.columns:
+                        fig_kpi1.add_trace(go.Bar(
+                            x=q_fin_df.index.strftime('%Y-Q%q' if hasattr(q_fin_df.index, 'quarter') else '%Y-%m'),
+                            y=q_fin_df['Revenue'] / scale_div,
+                            name='분기 매출액',
+                            marker_color='#29B6F6'
+                        ))
+                    if 'OperatingIncome' in q_fin_df.columns:
+                        fig_kpi1.add_trace(go.Bar(
+                            x=q_fin_df.index.strftime('%Y-Q%q' if hasattr(q_fin_df.index, 'quarter') else '%Y-%m'),
+                            y=q_fin_df['OperatingIncome'] / scale_div,
+                            name='분기 영업이익',
+                            marker_color='#26A69A'
+                        ))
+                    fig_kpi1.update_layout(
+                        title="분기별 매출액 및 영업이익 추이",
+                        height=350,
+                        barmode='group',
+                        template="plotly_dark",
+                        paper_bgcolor="#0E1117",
+                        plot_bgcolor="#0E1117",
+                        margin=dict(l=10, r=10, t=40, b=10)
+                    )
+                    st.plotly_chart(fig_kpi1, use_container_width=True)
+
+                with kpi_col2:
+                    # 순이익률(Net Margin %) & YoY 성장률 추세선
+                    fig_kpi2 = make_subplots(specs=[[{"secondary_y": True}]])
+                    if 'Net_Margin' in q_fin_df.columns:
+                        fig_kpi2.add_trace(
+                            go.Scatter(
+                                x=q_fin_df.index.strftime('%Y-Q%q' if hasattr(q_fin_df.index, 'quarter') else '%Y-%m'),
+                                y=q_fin_df['Net_Margin'],
+                                mode='lines+markers',
+                                name='순이익률 (Net Margin %)',
+                                line=dict(color='#AB47BC', width=2.5)
+                            ),
+                            secondary_y=False
+                        )
+                    if 'Rev_YoY' in q_fin_df.columns:
+                        fig_kpi2.add_trace(
+                            go.Bar(
+                                x=q_fin_df.index.strftime('%Y-Q%q' if hasattr(q_fin_df.index, 'quarter') else '%Y-%m'),
+                                y=q_fin_df['Rev_YoY'],
+                                name='매출 YoY 성장률 (%)',
+                                marker_color='rgba(255, 183, 77, 0.4)'
+                            ),
+                            secondary_y=True
+                        )
+                    fig_kpi2.update_layout(
+                        title="순이익률 (%) 및 매출 YoY 성장률 (%)",
+                        height=350,
+                        template="plotly_dark",
+                        paper_bgcolor="#0E1117",
+                        plot_bgcolor="#0E1117",
+                        margin=dict(l=10, r=10, t=40, b=10)
+                    )
+                    fig_kpi2.update_yaxes(title_text="순이익률 (%)", secondary_y=False)
+                    fig_kpi2.update_yaxes(title_text="매출 YoY (%)", secondary_y=True)
+                    st.plotly_chart(fig_kpi2, use_container_width=True)
+
+                # 3. 실적 원본 데이터 테이블 요약
+                with st.expander("📋 분기 실적 원본 데이터 확인"):
+                    disp_table = q_fin_df.copy()
+                    if 'Revenue' in disp_table.columns:
+                        disp_table['매출액'] = disp_table['Revenue'] / scale_div
+                    if 'OperatingIncome' in disp_table.columns:
+                        disp_table['영업이익'] = disp_table['OperatingIncome'] / scale_div
+                    if 'NetIncome' in disp_table.columns:
+                        disp_table['당기순이익'] = disp_table['NetIncome'] / scale_div
+                    
+                    show_cols = [c for c in ['매출액', '영업이익', '당기순이익', 'Net_Margin', 'Rev_YoY'] if c in disp_table.columns]
+                    st.dataframe(
+                        disp_table[show_cols].style.format({
+                            '매출액': f'{{:,.1f}} {unit_label}',
+                            '영업이익': f'{{:,.1f}} {unit_label}',
+                            '당기순이익': f'{{:,.1f}} {unit_label}',
+                            'Net_Margin': '{:.1f}%',
+                            'Rev_YoY': '{:+.1f}%'
+                        }),
+                        use_container_width=True
+                    )
 
 except Exception as e:
     st.error(f"데이터 조회 중 예기치 않은 오류가 발생했습니다: {e}")
