@@ -45,7 +45,7 @@ def send_telegram_message(message: str) -> bool:
     except Exception: return False
 
 # ==================== 세션 상태 초기화 ====================
-if "category_radio" not in st.session_state: st.session_state["category_radio"] = "해외주식 (US Custom)"
+if "category_radio" not in st.session_state: st.session_state["category_radio"] = "국내주식 (KRX)"
 if "custom_stock_name" not in st.session_state: st.session_state["custom_stock_name"] = None
 if "custom_stock_code" not in st.session_state: st.session_state["custom_stock_code"] = None
 if "tab_selector" not in st.session_state: st.session_state["tab_selector"] = "🏢 펀더멘털 & 실적-주가 복합 차트 (TrendSpider)"
@@ -97,7 +97,7 @@ def get_krx_stocks():
         df = fdr.StockListing('KRX')
         df = df.sort_values(by='Marcap', ascending=False).head(150)
         return dict(zip(df['Name'], df['Code']))
-    except Exception: return {"삼성전자": "005930", "SK하이닉스": "000660", "LG에너지솔루션": "373220", "현대차": "005380"}
+    except Exception: return {"SK하이닉스": "000660", "삼성전자": "005930", "LG에너지솔루션": "373220", "현대차": "005380"}
 
 def get_us_stocks():
     return {
@@ -112,13 +112,13 @@ st.sidebar.header("🕹️ 컨트롤 패널")
 input_mode = st.sidebar.radio("🔍 종목 선택 방식", ["목록에서 선택", "티커 직접 입력"], index=0)
 
 if input_mode == "목록에서 선택":
-    category = st.sidebar.radio("🌐 자산 카테고리", ["해외주식 (US Custom)", "국내주식 (KRX)", "채권 (Bonds)", "원자재 (Commodity)", "환율 (Forex)", "암호화폐 (Crypto)"], key="category_radio")
-    if category == "해외주식 (US Custom)": STOCKS, currency_symbol = get_us_stocks(), "USD"
-    elif category == "국내주식 (KRX)":
+    category = st.sidebar.radio("🌐 자산 카테고리", ["국내주식 (KRX)", "해외주식 (US Custom)", "채권 (Bonds)", "원자재 (Commodity)", "환율 (Forex)", "암호화폐 (Crypto)"], key="category_radio")
+    if category == "국내주식 (KRX)":
         STOCKS = get_krx_stocks()
         if st.session_state["custom_stock_name"] and st.session_state["custom_stock_code"]:
             STOCKS = {st.session_state["custom_stock_name"]: st.session_state["custom_stock_code"], **STOCKS}
         currency_symbol = "원"
+    elif category == "해외주식 (US Custom)": STOCKS, currency_symbol = get_us_stocks(), "USD"
     elif category == "채권 (Bonds)": STOCKS, currency_symbol = {"TLT": "TLT", "^TNX": "^TNX"}, "USD"
     elif category == "원자재 (Commodity)": STOCKS, currency_symbol = {"Gold": "GC=F", "WTI": "CL=F"}, "USD"
     elif category == "환율 (Forex)": STOCKS, currency_symbol = {"USD/KRW": "USD/KRW", "JPY/KRW": "JPY/KRW"}, "원"
@@ -130,7 +130,7 @@ if input_mode == "목록에서 선택":
     selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=options_list, index=selected_idx)
     selected_code = STOCKS[selected_name]
 else:
-    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: TSLA, META, AAPL, 005930, 284740)", value="TSLA").strip()
+    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: 000660, 005930, TSLA, META)", value="000660").strip()
     selected_name = f"Custom: {direct_ticker}"
     selected_code = direct_ticker
     currency_symbol = "원" if (direct_ticker.isdigit() or "KRW" in direct_ticker) else "USD"
@@ -213,7 +213,7 @@ def load_and_calculate_data(code, tf, period_str):
         df = df.loc[df.index >= pd.to_datetime(disp_start)]
     return df
 
-# ==================== 🏛️ 국내(DART) & 해외(SEC EDGAR) 10+년 분기 실적 로더 ====================
+# ==================== 🏛️ 국내 DART 계정과목 전수 매핑 엔진 ====================
 @st.cache_data(ttl=86400)
 def get_dart_corp_code_map(dart_key):
     try:
@@ -240,25 +240,59 @@ def fetch_single_dart_report(args):
         resp = requests.get(url, timeout=5).json()
         if resp.get("status") == "000" and "list" in resp:
             items = resp["list"]
+            # 1. 연결(CFS) 우선 시도, 없으면 개별(OFS) 폴백
             items_cfs = [it for it in items if it.get("fs_div") == "CFS"]
             target_items = items_cfs if items_cfs else items
             
             rev, op, net = np.nan, np.nan, np.nan
+            
+            # 2. 국내 전 업종 계정과목 정규식 패턴 전수 매칭
             for it in target_items:
-                if it.get("sj_div") in ["IS", "CIS"]:
-                    acc = it.get("account_nm", "").replace(" ", "")
-                    val_str = it.get("thstrm_amount", "0").replace(",", "")
+                # IS(손익계산서), CIS(포괄손익계산서) 모두 탐색
+                acc_nm = str(it.get("account_nm", "")).replace(" ", "").strip()
+                val_str = str(it.get("thstrm_amount", "0")).replace(",", "")
+                val_num = pd.to_numeric(val_str, errors='coerce')
+                
+                # A. 매출액 계정 (SK하이닉스, 삼성전자, 금융, 지주, 바이오 등)
+                if pd.isna(rev):
+                    if any(acc_nm == k for k in ["수익(매출액)", "매출액", "영업수익", "수익", "매출", "보험수익", "이자수익"]):
+                        rev = val_num
+                    elif re.search(r'^(수익\(매출액\)|매출액|영업수익|매출|수익)$', acc_nm):
+                        rev = val_num
+
+                # B. 영업이익 계정
+                if pd.isna(op):
+                    if any(acc_nm == k for k in ["영업이익", "영업이익(손실)", "영업손익"]):
+                        op = val_num
+                    elif "영업이익" in acc_nm or "영업손익" in acc_nm:
+                        op = val_num
+
+                # C. 당기순이익 계정
+                if pd.isna(net):
+                    if any(acc_nm == k for k in ["당기순이익", "당기순이익(손실)", "분기순이익", "분기순이익(손실)", "반기순이익", "반기순이익(손실)", "연결당기순이익"]):
+                        net = val_num
+                    elif "당기순이익" in acc_nm or "분기순이익" in acc_nm or "반기순이익" in acc_nm:
+                        net = val_num
+
+            # 만약 CFS에서 못 찾았을 경우 OFS 항목으로 2차 보완 탐색
+            if pd.isna(rev) or pd.isna(net):
+                for it in items:
+                    acc_nm = str(it.get("account_nm", "")).replace(" ", "").strip()
+                    val_str = str(it.get("thstrm_amount", "0")).replace(",", "")
                     val_num = pd.to_numeric(val_str, errors='coerce')
-                    if ("매출액" in acc or "수익(매출액)" in acc) and pd.isna(rev): rev = val_num
-                    elif "영업이익" in acc and pd.isna(op): op = val_num
-                    elif ("당기순이익" in acc or "순이익" in acc) and pd.isna(net): net = val_num
+                    if pd.isna(rev) and any(acc_nm == k for k in ["수익(매출액)", "매출액", "영업수익", "수익", "매출"]):
+                        rev = val_num
+                    if pd.isna(op) and any(acc_nm == k for k in ["영업이익", "영업이익(손실)", "영업손익"]):
+                        op = val_num
+                    if pd.isna(net) and any(acc_nm == k for k in ["당기순이익", "당기순이익(손실)", "분기순이익"]):
+                        net = val_num
 
             if pd.notna(rev) or pd.notna(net):
                 dt_key = pd.to_datetime(f"{y}-{end_day}")
                 return (dt_key, {
-                    'Revenue_Eok': rev / 100_000_000,
-                    'OperatingIncome_Eok': op / 100_000_000,
-                    'NetIncome_Eok': net / 100_000_000,
+                    'Revenue_Eok': rev / 100_000_000 if pd.notna(rev) else np.nan,
+                    'OperatingIncome_Eok': op / 100_000_000 if pd.notna(op) else np.nan,
+                    'NetIncome_Eok': net / 100_000_000 if pd.notna(net) else np.nan,
                     'q_num': q_num,
                     'year': y
                 })
@@ -282,6 +316,7 @@ def get_sec_cik_map():
 
 @st.cache_data(ttl=7200)
 def load_sec_edgar_10y_financials(ticker_symbol):
+    """SEC EDGAR 다중 태그 전수 병합으로 미국 기업의 10+년 분기 실적 복원"""
     t_clean = ticker_symbol.upper().strip()
     cik_map = get_sec_cik_map()
     cik = cik_map.get(t_clean)
@@ -304,16 +339,12 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                     'SalesRevenueGoodsNet',
                     'AutomotiveRevenues'
                 ]
-                
                 net_tags = [
                     'NetIncomeLoss',
                     'ProfitLoss',
                     'NetIncomeLossAvailableToCommonStockholdersBasic'
                 ]
-                
-                op_tags = [
-                    'OperatingIncomeLoss'
-                ]
+                op_tags = ['OperatingIncomeLoss']
 
                 def parse_multi_tags(tag_list, val_key):
                     for tag in tag_list:
@@ -409,13 +440,13 @@ def load_global_full_history_financials(code):
                 if not q1_row.empty: pure_dict[q1_row.index[0]] = {'Revenue_Eok': q1_row['Revenue_Eok'].iloc[0], 'OperatingIncome_Eok': q1_row['OperatingIncome_Eok'].iloc[0], 'NetIncome_Eok': q1_row['NetIncome_Eok'].iloc[0]}
                 if not q2_row.empty:
                     q1_r = q1_row['Revenue_Eok'].iloc[0] if not q1_row.empty else 0
-                    pure_dict[q2_row.index[0]] = {'Revenue_Eok': max(0.0, q2_row['Revenue_Eok'].iloc[0]-q1_r) if q2_row['Revenue_Eok'].iloc[0]>q1_r else q2_row['Revenue_Eok'].iloc[0], 'OperatingIncome_Eok': q2_row['OperatingIncome_Eok'].iloc[0]-(q1_row['OperatingIncome_Eok'].iloc[0] if not q1_row.empty else 0), 'NetIncome_Eok': q2_row['NetIncome_Eok'].iloc[0]-(q1_row['NetIncome_Eok'].iloc[0] if not q1_row.empty else 0)}
+                    pure_dict[q2_row.index[0]] = {'Revenue_Eok': max(0.0, q2_row['Revenue_Eok'].iloc[0]-q1_r) if (pd.notna(q2_row['Revenue_Eok'].iloc[0]) and q2_row['Revenue_Eok'].iloc[0]>q1_r) else q2_row['Revenue_Eok'].iloc[0], 'OperatingIncome_Eok': q2_row['OperatingIncome_Eok'].iloc[0]-(q1_row['OperatingIncome_Eok'].iloc[0] if not q1_row.empty else 0), 'NetIncome_Eok': q2_row['NetIncome_Eok'].iloc[0]-(q1_row['NetIncome_Eok'].iloc[0] if not q1_row.empty else 0)}
                 if not q3_row.empty:
                     q2_cum_r = q2_row['Revenue_Eok'].iloc[0] if not q2_row.empty else 0
-                    pure_dict[q3_row.index[0]] = {'Revenue_Eok': max(0.0, q3_row['Revenue_Eok'].iloc[0]-q2_cum_r) if q3_row['Revenue_Eok'].iloc[0]>q2_cum_r else q3_row['Revenue_Eok'].iloc[0], 'OperatingIncome_Eok': q3_row['OperatingIncome_Eok'].iloc[0]-(q2_row['OperatingIncome_Eok'].iloc[0] if not q2_row.empty else 0), 'NetIncome_Eok': q3_row['NetIncome_Eok'].iloc[0]-(q2_row['NetIncome_Eok'].iloc[0] if not q2_row.empty else 0)}
+                    pure_dict[q3_row.index[0]] = {'Revenue_Eok': max(0.0, q3_row['Revenue_Eok'].iloc[0]-q2_cum_r) if (pd.notna(q3_row['Revenue_Eok'].iloc[0]) and q3_row['Revenue_Eok'].iloc[0]>q2_cum_r) else q3_row['Revenue_Eok'].iloc[0], 'OperatingIncome_Eok': q3_row['OperatingIncome_Eok'].iloc[0]-(q2_row['OperatingIncome_Eok'].iloc[0] if not q2_row.empty else 0), 'NetIncome_Eok': q3_row['NetIncome_Eok'].iloc[0]-(q2_row['NetIncome_Eok'].iloc[0] if not q2_row.empty else 0)}
                 if not q4_row.empty:
                     q3_cum_r = q3_row['Revenue_Eok'].iloc[0] if not q3_row.empty else (q2_row['Revenue_Eok'].iloc[0] if not q2_row.empty else 0)
-                    pure_r = q4_row['Revenue_Eok'].iloc[0] - q3_cum_r if (q4_row['Revenue_Eok'].iloc[0] > q3_cum_r and q3_cum_r > 0) else q4_row['Revenue_Eok'].iloc[0] / 4
+                    pure_r = q4_row['Revenue_Eok'].iloc[0] - q3_cum_r if (pd.notna(q4_row['Revenue_Eok'].iloc[0]) and q4_row['Revenue_Eok'].iloc[0] > q3_cum_r and q3_cum_r > 0) else q4_row['Revenue_Eok'].iloc[0] / 4
                     pure_dict[q4_row.index[0]] = {'Revenue_Eok': max(0.0, pure_r), 'OperatingIncome_Eok': q4_row['OperatingIncome_Eok'].iloc[0]-(q3_row['OperatingIncome_Eok'].iloc[0] if not q3_row.empty else 0), 'NetIncome_Eok': q4_row['NetIncome_Eok'].iloc[0]-(q3_row['NetIncome_Eok'].iloc[0] if not q3_row.empty else 0)}
 
             final_df = pd.DataFrame.from_dict(pure_dict, orient='index').sort_index()
@@ -772,7 +803,6 @@ try:
                 with st.expander(f"📋 선택 기간({selected_period}) 분기 실적 원본 데이터 확인"):
                     disp_t = q_fin_df.copy()
                     disp_t.index = [d.strftime('%Y-%m-%d') for d in disp_t.index]
-                    # 안전한 문자열 포맷팅으로 직렬화 충돌 원천 방지
                     for c_name in disp_t.columns:
                         if c_name in ['Revenue_Eok', 'OperatingIncome_Eok', 'NetIncome_Eok']:
                             disp_t[c_name] = disp_t[c_name].apply(lambda x: f"{x:,.2f}" if pd.notna(x) else "-")
