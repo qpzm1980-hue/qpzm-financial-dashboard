@@ -11,6 +11,9 @@ import urllib.parse
 import json
 import re
 import time
+from bs4 import BeautifulSoup
+import requests
+from io import StringIO
 
 # 페이지 설정
 st.set_page_config(page_title="글로벌 종합 금융 프로 터미널", layout="wide", initial_sidebar_state="expanded")
@@ -363,7 +366,6 @@ def load_and_calculate_data(code, tf, period_str):
     interval = tf_config[tf]["interval"]
     yf_period = period_map_yf.get(period_str, "1y")
 
-    # 1) 분봉 조회
     if "m" in interval:
         df = pd.DataFrame()
         if code.isdigit() and len(code) == 6:
@@ -398,7 +400,6 @@ def load_and_calculate_data(code, tf, period_str):
         if df.index.tz is not None:
             df.index = df.index.tz_localize(None)
     else:
-        # 2) 일봉 / 주봉 / 월봉 조회
         today = datetime.date.today()
         if tf == "월봉":
             start_d = today - datetime.timedelta(days=365 * 25)
@@ -453,73 +454,146 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
-# ==================== 🏢 분기 실적 데이터 로드 함수 (TrendSpider용) ====================
+# ==================== 🏢 네이버 증권 & 야후 파이낸스 하이브리드 분기 실적 로더 ====================
 @st.cache_data(ttl=3600)
-def load_quarterly_financials(code):
-    """국내/해외 종목의 분기별 매출액, 순이익, 영업이익 데이터를 추출하여 정리"""
+def load_quarterly_financials_hybrid(code):
+    """국내 주식은 네이버 증권(Naver Financial)에서, 해외 주식은 Yahoo Finance에서 분기 실적 추출"""
+    # 1. 국내 주식 (6자리 숫자 티커) -> 네이버 금융 파싱
+    if str(code).isdigit() and len(str(code)) == 6:
+        try:
+            url = f"https://finance.naver.com/item/main.naver?code={code}"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            res = requests.get(url, headers=headers, timeout=5)
+            
+            if res.status_code == 200:
+                tables = pd.read_html(StringIO(res.text))
+                target_table = None
+                for t in tables:
+                    if any("주요재무정보" in str(col) for col in t.columns) or any("매출액" in str(idx) for idx in t.iloc[:, 0]):
+                        target_table = t
+                        break
+                
+                if target_table is not None:
+                    df_t = target_table.copy()
+                    # 멀티인덱스 칼럼 정리
+                    if isinstance(df_t.columns, pd.MultiIndex):
+                        cols = []
+                        for c in df_t.columns:
+                            c_str = " ".join([str(sub) for sub in c if str(sub) not in ['nan', 'Unnamed:']])
+                            cols.append(c_str.strip())
+                        df_t.columns = cols
+                    
+                    df_t.set_index(df_t.columns[0], inplace=True)
+                    
+                    # 분기 실적 칼럼만 추출 (예: '2024.03', '2024.06', '2024.09', '2024.12' 등)
+                    q_cols = []
+                    for col in df_t.columns:
+                        if re.search(r'\d{4}\.\d{2}', str(col)) and any(kw in str(col) for kw in ['최근 분기', '분기']):
+                            q_cols.append(col)
+                    
+                    # 분기 지정 키워드가 없더라도 날짜 패턴 매칭
+                    if not q_cols:
+                        for col in df_t.columns:
+                            if re.search(r'\d{4}\.\d{2}', str(col)):
+                                q_cols.append(col)
+                        # 뒤쪽 6개가 분기 실적
+                        q_cols = q_cols[-6:] if len(q_cols) >= 6 else q_cols
+
+                    res_dict = {}
+                    for q_col in q_cols:
+                        # 날짜 정제 (예: '2024.09(E)' -> '2024-09-30')
+                        date_match = re.search(r'(\d{4})\.(\d{2})', str(q_col))
+                        if date_match:
+                            y, m = date_match.group(1), date_match.group(2)
+                            # 월말 일자 매핑
+                            last_days = {'03': '31', '06': '30', '09': '30', '12': '31'}
+                            dt_str = f"{y}-{m}-{last_days.get(m, '28')}"
+                            
+                            # 매출액, 영업이익, 당기순이익 추출 (단위: 억원)
+                            rev_val = np.nan
+                            op_val = np.nan
+                            net_val = np.nan
+                            
+                            for row_idx in df_t.index:
+                                r_str = str(row_idx)
+                                val_raw = df_t.loc[row_idx, q_col]
+                                val_clean = pd.to_numeric(str(val_raw).replace(',', ''), errors='coerce')
+                                
+                                if "매출액" in r_str and pd.isna(rev_val):
+                                    rev_val = val_clean
+                                elif "영업이익" in r_str and pd.isna(op_val):
+                                    op_val = val_clean
+                                elif ("당기순이익" in r_str or "순이익" in r_str) and pd.isna(net_val):
+                                    net_val = val_clean
+
+                            if pd.notna(rev_val) or pd.notna(net_val):
+                                res_dict[pd.to_datetime(dt_str)] = {
+                                    'Revenue_Eok': rev_val,
+                                    'OperatingIncome_Eok': op_val,
+                                    'NetIncome_Eok': net_val
+                                }
+
+                    if res_dict:
+                        fin_df = pd.DataFrame.from_dict(res_dict, orient='index').sort_index()
+                        
+                        # 전년 동기 대비 성장률(YoY %) 계산
+                        if len(fin_df) >= 5:
+                            fin_df['Rev_YoY'] = fin_df['Revenue_Eok'].pct_change(4) * 100
+                            fin_df['Net_YoY'] = fin_df['NetIncome_Eok'].pct_change(4) * 100
+                        else:
+                            fin_df['Rev_YoY'] = fin_df['Revenue_Eok'].pct_change(1) * 100
+                            fin_df['Net_YoY'] = fin_df['NetIncome_Eok'].pct_change(1) * 100
+
+                        fin_df['Net_Margin'] = (fin_df['NetIncome_Eok'] / fin_df['Revenue_Eok']) * 100
+                        return fin_df
+        except Exception:
+            pass
+
+    # 2. 해외 주식 (미국 주식 등) -> Yahoo Finance 파싱
     try:
-        yf_ticker = code
-        if str(code).isdigit() and len(str(code)) == 6:
-            yf_ticker = f"{code}.KS"
-            
-        ticker = yf.Ticker(yf_ticker)
+        ticker = yf.Ticker(code)
         q_fin = ticker.quarterly_financials
-        
-        if (q_fin is None or q_fin.empty) and str(code).isdigit() and len(str(code)) == 6:
-            ticker = yf.Ticker(f"{code}.KQ")
-            q_fin = ticker.quarterly_financials
-            
         if q_fin is None or q_fin.empty:
             return pd.DataFrame()
-            
-        # 열(분기 날짜) 기준으로 정리 (과거 -> 최신 순)
+
         q_df = q_fin.T
         q_df.index = pd.to_datetime(q_df.index)
         q_df = q_df.sort_index()
 
         res = pd.DataFrame(index=q_df.index)
-        
-        # 1) 매출액 (Total Revenue)
         for rev_col in ['Total Revenue', 'Operating Revenue', 'Revenue']:
             if rev_col in q_df.columns:
-                res['Revenue'] = q_df[rev_col]
+                res['Revenue_Eok'] = q_df[rev_col] / 1_000_000_000 # 해외는 Billion USD
                 break
                 
-        # 2) 당기순이익 (Net Income)
         for net_col in ['Net Income', 'Net Income Common Stockholders']:
             if net_col in q_df.columns:
-                res['NetIncome'] = q_df[net_col]
+                res['NetIncome_Eok'] = q_df[net_col] / 1_000_000_000
                 break
 
-        # 3) 영업이익 (Operating Income)
         for op_col in ['Operating Income', 'Operating Revenue']:
             if op_col in q_df.columns:
-                res['OperatingIncome'] = q_df[op_col]
+                res['OperatingIncome_Eok'] = q_df[op_col] / 1_000_000_000
                 break
 
-        if 'Revenue' not in res.columns and 'NetIncome' not in res.columns:
-            return pd.DataFrame()
-            
-        # 전년 동기 대비 성장률(YoY) 계산 (4분기 전 대비)
-        if 'Revenue' in res.columns and len(res) >= 5:
-            res['Rev_YoY'] = res['Revenue'].pct_change(4) * 100
+        if 'Revenue_Eok' in res.columns and len(res) >= 5:
+            res['Rev_YoY'] = res['Revenue_Eok'].pct_change(4) * 100
         else:
-            res['Rev_YoY'] = np.nan
-            
-        if 'NetIncome' in res.columns and len(res) >= 5:
-            res['Net_YoY'] = res['NetIncome'].pct_change(4) * 100
-        else:
-            res['Net_YoY'] = np.nan
+            res['Rev_YoY'] = res['Revenue_Eok'].pct_change(1) * 100 if 'Revenue_Eok' in res.columns else np.nan
 
-        # 순이익률 (%)
-        if 'Revenue' in res.columns and 'NetIncome' in res.columns:
-            res['Net_Margin'] = (res['NetIncome'] / res['Revenue']) * 100
+        if 'NetIncome_Eok' in res.columns and len(res) >= 5:
+            res['Net_YoY'] = res['NetIncome_Eok'].pct_change(4) * 100
+        else:
+            res['Net_YoY'] = res['NetIncome_Eok'].pct_change(1) * 100 if 'NetIncome_Eok' in res.columns else np.nan
+
+        if 'Revenue_Eok' in res.columns and 'NetIncome_Eok' in res.columns:
+            res['Net_Margin'] = (res['NetIncome_Eok'] / res['Revenue_Eok']) * 100
 
         return res.dropna(how='all')
     except Exception:
         return pd.DataFrame()
 
-# ==================== ⚡ 사용자 맞춤 조건 수급 돌파 스캐너 (클린 필터 적용) ====================
+# ==================== ⚡ 사용자 맞춤 조건 수급 돌파 스캐너 ====================
 @st.cache_data(ttl=300)
 def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
     try:
@@ -613,7 +687,7 @@ def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
     except Exception:
         return pd.DataFrame(), str(datetime.date.today())
 
-# ==================== 🧊 장기 초소외주 스캐너 (클린 필터 적용) ====================
+# ==================== 🧊 장기 초소외주 스캐너 ====================
 @st.cache_data(ttl=600)
 def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_eok):
     try:
@@ -796,7 +870,6 @@ try:
 
         st.markdown("---")
         
-        # 5개 탭 구조 (TrendSpider 펀더멘털 오버레이 탭 추가)
         tab_titles = [
             "📊 인터랙티브 종합 차트", 
             "📈 벤치마크 상대 수익률(%) 비교", 
@@ -973,7 +1046,6 @@ try:
                 st.error(f"수익률 비교 중 오류: {e}")
 
         elif active_tab == "🔥 맞춤 조건 수급 폭발 스캐너":
-            # ==================== 🔥 수급 폭발 스캐너 ====================
             st.markdown("### 🔥 맞춤 조건 수급 폭발 주도주 실시간 스캐너")
             st.caption("🛡️ 거래정지, 상장폐지, 관리/환기종목, 우선주, 스팩, 리츠는 자동으로 완벽 제외됩니다.")
             
@@ -1061,7 +1133,7 @@ try:
                             if sent_ok:
                                 st.toast(f"텔레그램으로 전체 {total_cnt}개 종목 알림을 전송했습니다!", icon="🚀")
                             else:
-                                st.error("일부 메시지 전송 실패 (토큰 및 채팅방 상태를 확인하세요)")
+                                st.error("일부 메시지 전송 실패")
 
                 if not surge_data.empty:
                     st.success(f"조건을 만족한 주도주 **{len(surge_data)}개**가 포착되었습니다!")
@@ -1112,12 +1184,11 @@ try:
                                 )
                             st.markdown("---")
                 else:
-                    st.warning(f"기준일({scan_date})에 조건을 만족하는 종목이 없습니다. 조건을 조정한 후 다시 검색해 보세요.")
+                    st.warning(f"기준일({scan_date})에 조건을 만족하는 종목이 없습니다.")
             else:
                 st.info("💡 원하는 조건을 입력한 후 **[🔍 조건 검색 실행]** 버튼을 눌러주세요.")
 
         elif active_tab == "🧊 장기 초소외주 (1년 거래대금 100억 미만) 탐색기":
-            # ==================== 🧊 장기 초소외주 탐색기 ====================
             st.markdown("### 🧊 장기 초소외주 / 품절주 전수 탐색기")
             st.caption("🛡️ 거래정지, 상장폐지, 관리/환기종목, 우선주, 스팩, 리츠는 자동으로 완벽 제외됩니다.")
             
@@ -1247,20 +1318,25 @@ try:
         else:
             # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 실적-주가 복합 차트 ====================
             st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 분기 실적(KPI) 오버레이 차트")
-            st.caption("주가 캔들/라인과 분기별 매출액, 순이익, 성장률(YoY)을 TrendSpider 스타일로 결합하여 펀더멘털과 주가의 상관관계를 분석합니다.")
+            st.caption("주가 캔들/라인과 네이버 증권/야후의 분기별 매출액, 순이익, 성장률(YoY)을 TrendSpider 스타일로 결합하여 펀더멘털과 주가의 상관관계를 분석합니다.")
 
-            with st.spinner("분기별 재무 실적(매출액, 순이익, 영업이익) 데이터 불러오는 중..."):
-                q_fin_df = load_quarterly_financials(selected_code)
+            is_korean_stock = str(selected_code).isdigit() and len(str(selected_code)) == 6
+            data_source_name = "네이버 증권 (Naver Financial)" if is_korean_stock else "Yahoo Finance"
+            
+            with st.spinner(f"{data_source_name}에서 분기별 실적 데이터 로드 중..."):
+                q_fin_df = load_quarterly_financials_hybrid(selected_code)
 
             if q_fin_df.empty:
-                st.warning(f"'{selected_name}' 종목의 분기 재무제표 데이터를 가져올 수 없습니다. (지수/환율/원자재/코인이거나 실적 미제공 종목일 수 있습니다)")
+                st.warning(f"'{selected_name}' 종목의 분기 재무제표 데이터를 가져올 수 없습니다. (지수/환율/원자재/코인이거나 재무제표 미제공 종목일 수 있습니다)")
             else:
-                # 1. 상단 TrendSpider 스타일 메인 차트 (주가 라인 + 분기 매출액/순이익 오버레이)
-                st.markdown("#### 📈 주가 & 분기 실적 스텝 오버레이 (TrendSpider)")
+                unit_label = "억원" if is_korean_stock else "Billion USD"
+                
+                # 1. 상단 TrendSpider 스타일 메인 차트 (주가 라인 + 분기 매출액/순이익 계단식 블록 + YoY 라벨)
+                st.markdown(f"#### 📈 주가 & 분기 실적 스텝 오버레이 (데이터 출처: `{data_source_name}`)")
                 
                 fig_ts = make_subplots(specs=[[{"secondary_y": True}]])
                 
-                # A. 기본 주가 라인/영역 차트
+                # A. 기본 주가 라인 차트 (배경)
                 fig_ts.add_trace(
                     go.Scatter(
                         x=display_df.index,
@@ -1269,38 +1345,59 @@ try:
                         name='주가 (Close)',
                         line=dict(color='#29B6F6', width=2),
                         fill='tozeroy',
-                        fillcolor='rgba(41, 182, 246, 0.05)'
+                        fillcolor='rgba(41, 182, 246, 0.04)'
                     ),
                     secondary_y=False
                 )
 
-                # B. 분기 매출액 (우측 축 - 계단식 스텝 라인 또는 바)
-                unit_label = "억원" if category == "국내주식 (KRX)" or selected_code.isdigit() else "Billion USD"
-                scale_div = 100_000_000 if category == "국내주식 (KRX)" or selected_code.isdigit() else 1_000_000_000
-
-                if 'Revenue' in q_fin_df.columns:
-                    scaled_rev = q_fin_df['Revenue'] / scale_div
+                # B. TrendSpider 특유의 계단식 스텝 바 & 실적 배지
+                if 'Revenue_Eok' in q_fin_df.columns:
+                    # 실적 스텝 라인 (계단식)
                     fig_ts.add_trace(
                         go.Scatter(
                             x=q_fin_df.index,
-                            y=scaled_rev,
-                            mode='lines+markers+text',
+                            y=q_fin_df['Revenue_Eok'],
+                            mode='lines+markers',
                             name=f'분기 매출액 ({unit_label})',
-                            line=dict(color='#26A69A', width=2.5, shape='hv'),  # TrendSpider 스타일 계단형 스텝
-                            marker=dict(size=8, symbol='diamond', color='#26A69A'),
-                            text=[f"{v:,.1f}" for v in scaled_rev],
-                            textposition="top center",
-                            textfont=dict(size=10, color="#26A69A")
+                            line=dict(color='#26A69A', width=3, shape='hv'),
+                            marker=dict(size=8, color='#26A69A', symbol='diamond')
                         ),
                         secondary_y=True
                     )
 
-                if 'NetIncome' in q_fin_df.columns:
-                    scaled_net = q_fin_df['NetIncome'] / scale_div
+                    # TrendSpider 스타일 라벨 배지 생성 (예: "Q3'24 +24.7%")
+                    badge_texts = []
+                    badge_colors = []
+                    for idx_dt, row_data in q_fin_df.iterrows():
+                        q_name = f"Q{idx_dt.quarter}'{str(idx_dt.year)[-2:]}"
+                        yoy_val = row_data.get('Rev_YoY', np.nan)
+                        
+                        if pd.notna(yoy_val):
+                            sign = "+" if yoy_val > 0 else ""
+                            badge_texts.append(f"<b>{q_name}</b><br>{sign}{yoy_val:.1f}%")
+                            badge_colors.append('#26A69A' if yoy_val >= 0 else '#EF5350')
+                        else:
+                            badge_texts.append(f"<b>{q_name}</b><br>{row_data['Revenue_Eok']:,.0f}{unit_label[0]}")
+                            badge_colors.append('#B2B5BE')
+
                     fig_ts.add_trace(
                         go.Scatter(
                             x=q_fin_df.index,
-                            y=scaled_net,
+                            y=q_fin_df['Revenue_Eok'],
+                            mode='text',
+                            text=badge_texts,
+                            textposition="top center",
+                            textfont=dict(size=11, color=badge_colors),
+                            showlegend=False
+                        ),
+                        secondary_y=True
+                    )
+
+                if 'NetIncome_Eok' in q_fin_df.columns:
+                    fig_ts.add_trace(
+                        go.Scatter(
+                            x=q_fin_df.index,
+                            y=q_fin_df['NetIncome_Eok'],
                             mode='lines+markers',
                             name=f'분기 순이익 ({unit_label})',
                             line=dict(color='#FFB74D', width=2, dash='dot', shape='hv'),
@@ -1310,7 +1407,7 @@ try:
                     )
 
                 fig_ts.update_layout(
-                    height=560,
+                    height=580,
                     template="plotly_dark",
                     paper_bgcolor="#0E1117",
                     plot_bgcolor="#0E1117",
@@ -1319,7 +1416,7 @@ try:
                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                 )
                 fig_ts.update_yaxes(title_text=f"주가 ({currency_symbol})", secondary_y=False, showgrid=True, gridcolor="#2A2E39")
-                fig_ts.update_yaxes(title_text=f"실적 ({unit_label})", secondary_y=True, showgrid=False)
+                fig_ts.update_yaxes(title_text=f"실적 규모 ({unit_label})", secondary_y=True, showgrid=False)
 
                 st.plotly_chart(fig_ts, use_container_width=True)
 
@@ -1329,88 +1426,105 @@ try:
                 st.markdown("#### 📊 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
                 kpi_col1, kpi_col2 = st.columns(2)
 
+                # 분기 라벨 (예: 2023-Q1, 2023-Q2 ...)
+                q_labels = [f"{d.year}-Q{d.quarter}" for d in q_fin_df.index]
+
                 with kpi_col1:
-                    # 매출액 & 영업이익 막대 콤보
                     fig_kpi1 = go.Figure()
-                    if 'Revenue' in q_fin_df.columns:
+                    if 'Revenue_Eok' in q_fin_df.columns:
                         fig_kpi1.add_trace(go.Bar(
-                            x=q_fin_df.index.strftime('%Y-Q%q' if hasattr(q_fin_df.index, 'quarter') else '%Y-%m'),
-                            y=q_fin_df['Revenue'] / scale_div,
-                            name='분기 매출액',
+                            x=q_labels,
+                            y=q_fin_df['Revenue_Eok'],
+                            name=f'분기 매출액 ({unit_label})',
                             marker_color='#29B6F6'
                         ))
-                    if 'OperatingIncome' in q_fin_df.columns:
+                    if 'OperatingIncome_Eok' in q_fin_df.columns:
                         fig_kpi1.add_trace(go.Bar(
-                            x=q_fin_df.index.strftime('%Y-Q%q' if hasattr(q_fin_df.index, 'quarter') else '%Y-%m'),
-                            y=q_fin_df['OperatingIncome'] / scale_div,
-                            name='분기 영업이익',
+                            x=q_labels,
+                            y=q_fin_df['OperatingIncome_Eok'],
+                            name=f'분기 영업이익 ({unit_label})',
                             marker_color='#26A69A'
                         ))
+                    if 'NetIncome_Eok' in q_fin_df.columns:
+                        fig_kpi1.add_trace(go.Bar(
+                            x=q_labels,
+                            y=q_fin_df['NetIncome_Eok'],
+                            name=f'분기 순이익 ({unit_label})',
+                            marker_color='#FFB74D'
+                        ))
                     fig_kpi1.update_layout(
-                        title="분기별 매출액 및 영업이익 추이",
-                        height=350,
+                        title=f"분기별 매출액, 영업이익, 순이익 추이 ({unit_label})",
+                        height=360,
                         barmode='group',
                         template="plotly_dark",
                         paper_bgcolor="#0E1117",
                         plot_bgcolor="#0E1117",
-                        margin=dict(l=10, r=10, t=40, b=10)
+                        margin=dict(l=10, r=10, t=40, b=10),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                     )
                     st.plotly_chart(fig_kpi1, use_container_width=True)
 
                 with kpi_col2:
-                    # 순이익률(Net Margin %) & YoY 성장률 추세선
                     fig_kpi2 = make_subplots(specs=[[{"secondary_y": True}]])
                     if 'Net_Margin' in q_fin_df.columns:
                         fig_kpi2.add_trace(
                             go.Scatter(
-                                x=q_fin_df.index.strftime('%Y-Q%q' if hasattr(q_fin_df.index, 'quarter') else '%Y-%m'),
+                                x=q_labels,
                                 y=q_fin_df['Net_Margin'],
                                 mode='lines+markers',
                                 name='순이익률 (Net Margin %)',
-                                line=dict(color='#AB47BC', width=2.5)
+                                line=dict(color='#AB47BC', width=2.5),
+                                marker=dict(size=6)
                             ),
                             secondary_y=False
                         )
                     if 'Rev_YoY' in q_fin_df.columns:
+                        yoy_bar_colors = ['#26A69A' if v >= 0 else '#EF5350' for v in q_fin_df['Rev_YoY'].fillna(0)]
                         fig_kpi2.add_trace(
                             go.Bar(
-                                x=q_fin_df.index.strftime('%Y-Q%q' if hasattr(q_fin_df.index, 'quarter') else '%Y-%m'),
+                                x=q_labels,
                                 y=q_fin_df['Rev_YoY'],
                                 name='매출 YoY 성장률 (%)',
-                                marker_color='rgba(255, 183, 77, 0.4)'
+                                marker_color=yoy_bar_colors,
+                                opacity=0.4
                             ),
                             secondary_y=True
                         )
                     fig_kpi2.update_layout(
                         title="순이익률 (%) 및 매출 YoY 성장률 (%)",
-                        height=350,
+                        height=360,
                         template="plotly_dark",
                         paper_bgcolor="#0E1117",
                         plot_bgcolor="#0E1117",
-                        margin=dict(l=10, r=10, t=40, b=10)
+                        margin=dict(l=10, r=10, t=40, b=10),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
                     )
                     fig_kpi2.update_yaxes(title_text="순이익률 (%)", secondary_y=False)
                     fig_kpi2.update_yaxes(title_text="매출 YoY (%)", secondary_y=True)
                     st.plotly_chart(fig_kpi2, use_container_width=True)
 
-                # 3. 실적 원본 데이터 테이블 요약
-                with st.expander("📋 분기 실적 원본 데이터 확인"):
+                # 3. 실적 원본 데이터 테이블
+                with st.expander("📋 분기 실적 원본 데이터 테이블 확인"):
                     disp_table = q_fin_df.copy()
-                    if 'Revenue' in disp_table.columns:
-                        disp_table['매출액'] = disp_table['Revenue'] / scale_div
-                    if 'OperatingIncome' in disp_table.columns:
-                        disp_table['영업이익'] = disp_table['OperatingIncome'] / scale_div
-                    if 'NetIncome' in disp_table.columns:
-                        disp_table['당기순이익'] = disp_table['NetIncome'] / scale_div
+                    disp_table.index = [d.strftime('%Y-%m-%d') for d in disp_table.index]
                     
-                    show_cols = [c for c in ['매출액', '영업이익', '당기순이익', 'Net_Margin', 'Rev_YoY'] if c in disp_table.columns]
+                    rename_dict = {
+                        'Revenue_Eok': f'매출액 ({unit_label})',
+                        'OperatingIncome_Eok': f'영업이익 ({unit_label})',
+                        'NetIncome_Eok': f'당기순이익 ({unit_label})',
+                        'Net_Margin': '순이익률 (%)',
+                        'Rev_YoY': '매출 YoY 성장률 (%)'
+                    }
+                    disp_table.rename(columns=rename_dict, inplace=True)
+                    
+                    show_cols = [c for c in rename_dict.values() if c in disp_table.columns]
                     st.dataframe(
                         disp_table[show_cols].style.format({
-                            '매출액': f'{{:,.1f}} {unit_label}',
-                            '영업이익': f'{{:,.1f}} {unit_label}',
-                            '당기순이익': f'{{:,.1f}} {unit_label}',
-                            'Net_Margin': '{:.1f}%',
-                            'Rev_YoY': '{:+.1f}%'
+                            f'매출액 ({unit_label})': '{:,.1f}',
+                            f'영업이익 ({unit_label})': '{:,.1f}',
+                            f'당기순이익 ({unit_label})': '{:,.1f}',
+                            '순이익률 (%)': '{:.1f}%',
+                            '매출 YoY 성장률 (%)': '{:+.1f}%'
                         }),
                         use_container_width=True
                     )
