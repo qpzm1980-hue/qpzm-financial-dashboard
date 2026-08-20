@@ -449,70 +449,56 @@ def load_and_calculate_data(code, tf, period_str):
 
     return df
 
-# ==================== 🏢 100% 순수 분기 실적(Quarterly Only) 로더 ====================
+# ==================== 🏢 4~5개년 과거 분기 실적(Pure Quarterly) 다중 크롤러 ====================
 @st.cache_data(ttl=3600)
 def load_pure_quarterly_financials(code):
-    """국내 주식(네이버/FnGuide 분기 전용) 및 해외 주식(야후 분기 전용) 순수 분기 실적 추출"""
+    """국내 주식은 네이버 모바일 API/FnGuide/포괄손익계산서 다중 파싱으로 과거 4~5개년 분기 실적 복원"""
     if str(code).isdigit() and len(str(code)) == 6:
         res_dict = {}
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         
+        # 1. 네이버 모바일 금융 API (과거 및 최신 분기 데이터 JSON)
         try:
-            naver_url = f"https://finance.naver.com/item/main.naver?code={code}"
-            n_res = requests.get(naver_url, headers=headers, timeout=5)
-            if n_res.status_code == 200:
-                n_tables = pd.read_html(StringIO(n_res.text))
-                for t in n_tables:
-                    if any("주요재무정보" in str(col) for col in t.columns) or any("매출액" in str(idx) for idx in t.iloc[:, 0]):
-                        df_nt = t.copy()
-                        if isinstance(df_nt.columns, pd.MultiIndex):
-                            q_cols = []
-                            for c in df_nt.columns:
-                                top_level = str(c[0])
-                                sub_level = str(c[1])
-                                if "분기" in top_level and re.search(r'\d{4}\.\d{2}', sub_level):
-                                    q_cols.append(c)
+            m_url = f"https://m.stock.naver.com/api/stock/{code}/finance/quarter"
+            m_res = requests.get(m_url, headers=headers, timeout=5)
+            if m_res.status_code == 200:
+                data_json = m_res.json()
+                if "financeInfo" in data_json:
+                    fin_data = data_json["financeInfo"]
+                    # 분기 목록 추출
+                    periods = fin_data.get("periods", [])
+                    rev_list = fin_data.get("totalRevenue", [])
+                    op_list = fin_data.get("operatingIncome", [])
+                    net_list = fin_data.get("netIncome", [])
+                    
+                    for idx, p_str in enumerate(periods):
+                        m = re.search(r'(\d{4})\.(\d{2})', str(p_str))
+                        if m:
+                            y, mo = m.group(1), m.group(2)
+                            last_days = {'03': '31', '06': '30', '09': '30', '12': '31'}
+                            dt_key = pd.to_datetime(f"{y}-{mo}-{last_days.get(mo, '28')}")
                             
-                            df_nt.set_index(df_nt.columns[0], inplace=True)
+                            r_val = float(rev_list[idx]) if idx < len(rev_list) and rev_list[idx] is not None else np.nan
+                            o_val = float(op_list[idx]) if idx < len(op_list) and op_list[idx] is not None else np.nan
+                            n_val = float(net_list[idx]) if idx < len(net_list) and net_list[idx] is not None else np.nan
                             
-                            for col_tuple in q_cols:
-                                sub_str = str(col_tuple[1])
-                                m = re.search(r'(\d{4})\.(\d{2})', sub_str)
-                                if m:
-                                    y, mo = m.group(1), m.group(2)
-                                    last_days = {'03': '31', '06': '30', '09': '30', '12': '31'}
-                                    dt_key = pd.to_datetime(f"{y}-{mo}-{last_days.get(mo, '28')}")
-
-                                    rev_val = np.nan
-                                    op_val = np.nan
-                                    net_val = np.nan
-
-                                    for r_idx in df_nt.index:
-                                        r_str = str(r_idx)
-                                        val_clean = pd.to_numeric(str(df_nt.loc[r_idx, col_tuple]).replace(',', ''), errors='coerce')
-                                        if "매출액" in r_str and pd.isna(rev_val):
-                                            rev_val = val_clean
-                                        elif "영업이익" in r_str and pd.isna(op_val):
-                                            op_val = val_clean
-                                        elif ("당기순이익" in r_str or "순이익" in r_str) and pd.isna(net_val):
-                                            net_val = val_clean
-
-                                    if pd.notna(rev_val) or pd.notna(net_val):
-                                        res_dict[dt_key] = {
-                                            'Revenue_Eok': rev_val,
-                                            'OperatingIncome_Eok': op_val,
-                                            'NetIncome_Eok': net_val
-                                        }
+                            if pd.notna(r_val) or pd.notna(n_val):
+                                res_dict[dt_key] = {
+                                    'Revenue_Eok': r_val,
+                                    'OperatingIncome_Eok': o_val,
+                                    'NetIncome_Eok': n_val
+                                }
         except Exception:
             pass
 
+        # 2. FnGuide 포괄손익계산서 전체 분기 테이블 파싱 (과거 3~5개년 분기 완벽 보완)
         try:
             fn_url = f"http://comp.fnguide.com/SVO2/ASP/SVD_Finance.asp?pGB=1&gicode=A{code}"
             fn_res = requests.get(fn_url, headers=headers, timeout=6)
             if fn_res.status_code == 200:
                 tables = pd.read_html(StringIO(fn_res.text))
                 for t in tables:
-                    if any("매출액" in str(idx) for idx in t.iloc[:, 0]):
+                    if any("매출액" in str(idx) for idx in t.iloc[:, 0]) or any("매출액" in str(c) for c in t.columns):
                         df_t = t.copy()
                         df_t.set_index(df_t.columns[0], inplace=True)
                         date_cols = [c for c in df_t.columns if re.search(r'\d{4}/(03|06|09|12)', str(c)) and '전년' not in str(c)]
@@ -548,6 +534,49 @@ def load_pure_quarterly_financials(code):
         except Exception:
             pass
 
+        # 3. 네이버 증권 PC 메인 표 결합
+        try:
+            naver_url = f"https://finance.naver.com/item/main.naver?code={code}"
+            n_res = requests.get(naver_url, headers=headers, timeout=5)
+            if n_res.status_code == 200:
+                n_tables = pd.read_html(StringIO(n_res.text))
+                for t in n_tables:
+                    if any("주요재무정보" in str(col) for col in t.columns) or any("매출액" in str(idx) for idx in t.iloc[:, 0]):
+                        df_nt = t.copy()
+                        if isinstance(df_nt.columns, pd.MultiIndex):
+                            q_cols = [c for c in df_nt.columns if "분기" in str(c[0]) and re.search(r'\d{4}\.\d{2}', str(c[1]))]
+                            df_nt.set_index(df_nt.columns[0], inplace=True)
+                            
+                            for col_tuple in q_cols:
+                                m = re.search(r'(\d{4})\.(\d{2})', str(col_tuple[1]))
+                                if m:
+                                    y, mo = m.group(1), m.group(2)
+                                    last_days = {'03': '31', '06': '30', '09': '30', '12': '31'}
+                                    dt_key = pd.to_datetime(f"{y}-{mo}-{last_days.get(mo, '28')}")
+
+                                    rev_val = np.nan
+                                    op_val = np.nan
+                                    net_val = np.nan
+
+                                    for r_idx in df_nt.index:
+                                        r_str = str(r_idx)
+                                        val_clean = pd.to_numeric(str(df_nt.loc[r_idx, col_tuple]).replace(',', ''), errors='coerce')
+                                        if "매출액" in r_str and pd.isna(rev_val):
+                                            rev_val = val_clean
+                                        elif "영업이익" in r_str and pd.isna(op_val):
+                                            op_val = val_clean
+                                        elif ("당기순이익" in r_str or "순이익" in r_str) and pd.isna(net_val):
+                                            net_val = val_clean
+
+                                    if pd.notna(rev_val) or pd.notna(net_val):
+                                        if dt_key not in res_dict:
+                                            res_dict[dt_key] = {}
+                                        if pd.notna(rev_val): res_dict[dt_key]['Revenue_Eok'] = rev_val
+                                        if pd.notna(op_val): res_dict[dt_key]['OperatingIncome_Eok'] = op_val
+                                        if pd.notna(net_val): res_dict[dt_key]['NetIncome_Eok'] = net_val
+        except Exception:
+            pass
+
         if res_dict:
             fin_df = pd.DataFrame.from_dict(res_dict, orient='index').sort_index()
             if 'Revenue_Eok' in fin_df.columns:
@@ -562,6 +591,7 @@ def load_pure_quarterly_financials(code):
 
             return fin_df.dropna(how='all')
 
+    # 해외 주식 (미국 주식 등) -> Yahoo Finance 분기 데이터
     try:
         ticker = yf.Ticker(code)
         q_fin = ticker.quarterly_financials
@@ -1328,22 +1358,20 @@ try:
                 st.info("💡 조건을 설정한 뒤 **[🧊 소외주 전수 스캔]** 버튼을 눌러주세요.")
 
         else:
-            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 실적-주가 복합 차트 (주기 및 기간 완벽 반영) ====================
+            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 실적-주가 복합 차트 ====================
             st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 분기 실적(KPI) 오버레이 차트")
-            st.caption(f"사이드바에서 선택하신 **주기({timeframe})**와 **조회 기간({selected_period})**이 그대로 적용되며, 순수 분기 실적 데이터와 1:1로 결합됩니다.")
+            st.caption(f"사이드바에서 선택하신 **주기({timeframe})**와 **조회 기간({selected_period})**이 그대로 적용되며, 과거 3~5개년 순수 분기 실적 데이터와 1:1로 결합됩니다.")
 
             is_korean_stock = str(selected_code).isdigit() and len(str(selected_code)) == 6
-            data_source_name = "네이버 증권 & FnGuide 분기 데이터" if is_korean_stock else "Yahoo Finance 분기 데이터"
+            data_source_name = "네이버 금융 & FnGuide 분기 데이터" if is_korean_stock else "Yahoo Finance 분기 데이터"
             
-            with st.spinner(f"{data_source_name}에서 순수 분기 실적 로드 중..."):
+            with st.spinner(f"{data_source_name}에서 과거 3~5개년 순수 분기 실적 로드 중..."):
                 q_fin_df = load_pure_quarterly_financials(selected_code)
 
             if q_fin_df.empty:
                 st.warning(f"'{selected_name}' 종목의 분기 재무제표 데이터를 가져올 수 없습니다. (지수/환율/원자재/코인이거나 재무제표 미제공 종목일 수 있습니다)")
             else:
                 unit_label = "억원" if is_korean_stock else "Billion USD"
-                
-                # 🎯 display_df(사이드바의 주기/기간 설정이 100% 적용된 주가 데이터)를 직접 사용하여 기간 불일치 해결
                 synced_price_df = display_df
 
                 # 1. 상단 TrendSpider 스타일 메인 차트
@@ -1365,7 +1393,7 @@ try:
                     secondary_y=False
                 )
 
-                # B. 계단형 스텝 라인을 위한 분기 시작-종료 시계열 생성 (주가 차트 범위 내 필터링)
+                # B. 계단형 스텝 라인을 위한 분기 시작-종료 시계열 생성
                 chart_min_date = synced_price_df.index.min()
                 chart_max_date = synced_price_df.index.max()
 
@@ -1377,7 +1405,6 @@ try:
                     curr_dt = q_fin_df.index[i]
                     next_dt = q_fin_df.index[i+1] if (i+1 < len(q_fin_df)) else curr_dt + datetime.timedelta(days=90)
                     
-                    # 주가 차트 기간과 겹치는 분기만 포함
                     if next_dt >= chart_min_date and curr_dt <= chart_max_date + datetime.timedelta(days=90):
                         r_val = q_fin_df['Revenue_Eok'].iloc[i] if 'Revenue_Eok' in q_fin_df.columns else np.nan
                         n_val = q_fin_df['NetIncome_Eok'].iloc[i] if 'NetIncome_Eok' in q_fin_df.columns else np.nan
@@ -1465,7 +1492,7 @@ try:
                 st.markdown("---")
 
                 # 2. 하단 펀더멘털 Segments & KPIs 차트
-                st.markdown("#### 📊 순수 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
+                st.markdown("#### 📊 과거 3~5개년 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
                 kpi_col1, kpi_col2 = st.columns(2)
 
                 q_labels = [f"{d.year}-Q{(d.month-1)//3 + 1}" for d in q_fin_df.index]
@@ -1545,7 +1572,7 @@ try:
                     st.plotly_chart(fig_kpi2, use_container_width=True)
 
                 # 3. 실적 원본 데이터 테이블
-                with st.expander("📋 순수 분기 실적 원본 데이터 테이블 확인"):
+                with st.expander("📋 과거 3~5개년 순수 분기 실적 원본 데이터 테이블 확인"):
                     disp_table = q_fin_df.copy()
                     disp_table.index = [d.strftime('%Y-%m-%d') for d in disp_table.index]
                     
