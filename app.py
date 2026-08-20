@@ -135,20 +135,24 @@ else:
     selected_code = direct_ticker
     currency_symbol = "원" if (direct_ticker.isdigit() or "KRW" in direct_ticker) else "USD"
 
+# ⏱️ 일봉: 1년 기본, 주봉: 3년 기본, 월봉: 5년 기본 설정
 tf_config = {
-    "5분봉": {"default": "1일", "options": ["1일", "3일", "5일", "1개월", "2개월"], "interval": "5m"},
-    "30분봉": {"default": "5일", "options": ["5일", "1개월", "2개월"], "interval": "30m"},
-    "1시간봉": {"default": "1개월", "options": ["5일", "1개월", "2개월", "6개월"], "interval": "60m"},
-    "일봉": {"default": "5년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1d"},
-    "주봉": {"default": "5년", "options": ["6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1wk"},
-    "월봉": {"default": "최대(All)", "options": ["1년", "3년", "5년", "10년", "최대(All)"], "interval": "1mo"}
+    "일봉": {"default": "1년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1d"},
+    "주봉": {"default": "3년", "options": ["6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1wk"},
+    "월봉": {"default": "5년", "options": ["1년", "3년", "5년", "10년", "최대(All)"], "interval": "1mo"}
 }
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⏱️ 차트 주기 & 기간")
-timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=3)
+timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=0)
 current_cfg = tf_config[timeframe]
-selected_period = st.sidebar.select_slider("📅 조회 기간", options=current_cfg["options"], value=current_cfg["default"])
+
+selected_period = st.sidebar.select_slider(
+    "📅 조회 기간", 
+    options=current_cfg["options"], 
+    value=current_cfg["default"],
+    key=f"slider_period_{timeframe}"
+)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("📐 보조지표 표시")
@@ -158,51 +162,28 @@ show_rsi = st.sidebar.checkbox("RSI (14)", value=True)
 show_macd = st.sidebar.checkbox("MACD (12, 26, 9)", value=True)
 
 if "DART_API_KEY" in st.secrets:
-    st.sidebar.success("🏛️ DART & SEC EDGAR 10년 연동")
+    st.sidebar.success("🏛️ DART & SEC EDGAR 연동 활성화")
 
 if st.sidebar.button("🔄 최신 시세 강제 갱신"):
     st.cache_data.clear()
     st.rerun()
 
 # ==================== 데이터 계산 ====================
-period_map_yf = {"1일": "1d", "3일": "3d", "5일": "5d", "1달": "1mo", "1개월": "1mo", "2개월": "2mo", "6개월": "6mo", "1년": "1y", "3년": "3y", "5년": "5y", "10년": "10y", "최대(All)": "max"}
+days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
 
 @st.cache_data(ttl=60)
 def load_and_calculate_data(code, tf, period_str):
-    interval = tf_config[tf]["interval"]
-    yf_period = period_map_yf.get(period_str, "max")
-
-    if "m" in interval:
-        df = pd.DataFrame()
-        if code.isdigit() and len(code) == 6:
-            for suffix in [".KS", ".KQ"]:
-                try:
-                    df = yf.Ticker(f"{code}{suffix}").history(period=yf_period, interval=interval)
-                    if not df.empty: break
-                except Exception: continue
-        elif "/" in code:
-            c_base, c_quote = code.split("/")
-            yf_code = f"{c_base}{c_quote}=X" if c_quote in ["KRW", "USD", "JPY", "EUR"] else code.replace("/", "-")
-            try: df = yf.Ticker(yf_code).history(period=yf_period, interval=interval)
-            except Exception: df = pd.DataFrame()
-        else:
-            try: df = yf.Ticker(code).history(period=yf_period, interval=interval)
-            except Exception: df = pd.DataFrame()
-        if df.empty: return df
-        if df.index.tz is not None: df.index = df.index.tz_localize(None)
+    today = datetime.date.today()
+    if period_str == "최대(All)":
+        start_d = "1990-01-01"
     else:
-        today = datetime.date.today()
-        if period_str == "최대(All)":
-            start_d = "1990-01-01"
-        else:
-            days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
-            start_d = today - datetime.timedelta(days=days_calc.get(period_str, 365*5) + 400)
-            
-        try: df = fdr.DataReader(code, start_d)
-        except Exception: df = pd.DataFrame()
-        if df.empty: return df
-        if tf == "주봉": df = df.resample('W-FRI').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
-        elif tf == "월봉": df = df.resample('ME').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
+        start_d = today - datetime.timedelta(days=days_calc.get(period_str, 365) + 400)
+        
+    try: df = fdr.DataReader(code, start_d)
+    except Exception: df = pd.DataFrame()
+    if df.empty: return df
+    if tf == "주봉": df = df.resample('W-FRI').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
+    elif tf == "월봉": df = df.resample('ME').agg({'Open':'first', 'High':'max', 'Low':'min', 'Close':'last', 'Volume':'sum'}).dropna()
 
     if 'Volume' not in df.columns: df['Volume'] = 0
     df['20선'] = df['Close'].rolling(20).mean()
@@ -222,8 +203,8 @@ def load_and_calculate_data(code, tf, period_str):
     df['MACD_Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
-    if "m" not in interval and period_str != "최대(All)":
-        days_disp = days_calc.get(period_str, 365*5)
+    if period_str != "최대(All)":
+        days_disp = days_calc.get(period_str, 365)
         disp_start = today - datetime.timedelta(days=days_disp)
         df = df.loc[df.index >= pd.to_datetime(disp_start)]
     return df
@@ -475,11 +456,17 @@ try:
         m4.metric("기간 내 MDD (최대 낙폭)", f"{mdd:.2f}%", delta_color="inverse")
 
         st.markdown("---")
-        tab_titles = ["📊 인터랙티브 종합 차트", "📈 벤치마크 상대 수익률(%) 비교", "🏢 펀더멘털 & 실적-주가 복합 차트 (TrendSpider)"]
+        tab_titles = [
+            "📊 인터랙티브 종합 차트", 
+            "📈 벤치마크 상대 수익률(%) 비교", 
+            "🔥 맞춤 조건 수급 폭발 스캐너",
+            "🧊 장기 초소외주 (1년 거래대금 100억 미만) 탐색기",
+            "🏢 펀더멘털 & 실적-주가 복합 차트 (TrendSpider)"
+        ]
         active_tab = st.radio("탭 선택", tab_titles, horizontal=True, label_visibility="collapsed", key="tab_selector")
 
         if active_tab == "📊 인터랙티브 종합 차트":
-            x_data = display_df.index.strftime('%Y-%m-%d %H:%M') if "m" in tf_config[timeframe]["interval"] else display_df.index
+            x_data = display_df.index
             fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.6, 0.2, 0.2], subplot_titles=["가격 및 이평선", "거래량", "MACD"])
             fig.add_trace(go.Candlestick(x=x_data, open=display_df['Open'], high=display_df['High'], low=display_df['Low'], close=display_df['Close'], name='시세', increasing_line_color='#26A69A', decreasing_line_color='#EF5350'), row=1, col=1)
             if show_ma:
@@ -505,6 +492,57 @@ try:
                 c_fig.update_layout(height=480, template="plotly_dark", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", yaxis_title="수익률(%)", hovermode='x unified')
                 st.plotly_chart(c_fig, use_container_width=True)
 
+        elif active_tab == "🔥 맞춤 조건 수급 폭발 스캐너":
+            st.markdown("### 🔥 맞춤 조건 수급 폭발 주도주 실시간 스캐너")
+            c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.0, 1.0])
+            i_lookback = c1.number_input("📅 잠복 거래일수", 1, 365, 20, 5)
+            i_threshold = c2.number_input("💰 돌파 거래대금 (억원)", 10, 10000, 500, 50)
+            i_min_chg = c3.selectbox("📈 최소 당일 상승률", [0.0, 3.0, 5.0, 7.0, 10.0, 15.0], 0, format_func=lambda x: "전체" if x == 0.0 else f"+{x:.0f}% 이상")
+            c4.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            if c4.button("🔍 조건 검색 실행", type="primary", use_container_width=True):
+                with st.spinner("KRX 전 종목 스캔 중..."):
+                    st.session_state["scan_results_df"], st.session_state["scan_results_date"] = scan_custom_volume_surge(i_lookback, i_threshold * 100_000_000, i_min_chg)
+                    st.session_state["last_scanned_params"] = {"lookback": i_lookback, "threshold": i_threshold}
+
+            if st.session_state["scan_results_df"] is not None:
+                s_df, s_date = st.session_state["scan_results_df"], st.session_state["scan_results_date"]
+                if not s_df.empty:
+                    st.success(f"포착 종목 **{len(s_df)}개**")
+                    if st.button("📲 텔레그램 전체 전송"):
+                        for idx_s in range(0, len(s_df), 20):
+                            chunk = s_df.iloc[idx_s:idx_s+20]
+                            lines = [f"🚨 *[수급 폭발 종목]* ({idx_s+1}~{min(idx_s+20, len(s_df))})"]
+                            for _, r in chunk.iterrows(): lines.append(f"• *{r['Name']}* (`{r['Code']}`): {r['Close']:,.0f}원 ({r['ChgRate']:+.2f}%) | {r['당일거래대금(억원)']}억")
+                            send_telegram_message("\n".join(lines)); time.sleep(0.3)
+                        st.toast("텔레그램 전송 완료!", icon="🚀")
+                    st.dataframe(s_df.style.format({'Close': '{:,.0f}원', 'ChgRate': '{:+.2f}%', '당일거래대금(억원)': '{:,.1f} 억'}), use_container_width=True)
+
+        elif active_tab == "🧊 장기 초소외주 (1년 거래대금 100억 미만) 탐색기":
+            st.markdown("### 🧊 장기 초소외주 / 품절주 전수 탐색기")
+            d1, d2, d3, d4, d5 = st.columns([1.1, 1.1, 1.0, 1.0, 1.0])
+            dl = d1.number_input("📅 추적 기간 (일수)", 30, 500, 365, 30)
+            dm = d2.number_input("🚫 최대 거래대금 상한선 (억원)", 1, 500, 100, 10)
+            dmin = d3.number_input("💵 최소 시총 (억원)", 50, 5000, 300, 50)
+            dmax = d4.number_input("💎 최대 시총 (억원)", 100, 50000, 3000, 500)
+            d5.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
+            if d5.button("🧊 소외주 전수 스캔", type="primary", use_container_width=True):
+                with st.spinner("초소외주 분석 중..."):
+                    st.session_state["dormant_scan_results"], st.session_state["dormant_scan_date"] = scan_dormant_stocks(dl, dm * 100_000_000, dmin, dmax)
+                    st.session_state["dormant_params"] = {"lookback": dl, "max_amt": dm}
+
+            if st.session_state["dormant_scan_results"] is not None:
+                dd_df = st.session_state["dormant_scan_results"]
+                if not dd_df.empty:
+                    st.success(f"발굴 종목 **{len(dd_df)}개**")
+                    if st.button("📲 소외주 전체 텔레그램 전송"):
+                        for idx_d in range(0, len(dd_df), 20):
+                            chunk = dd_df.iloc[idx_d:idx_d+20]
+                            lines = [f"🧊 *[초소외주 목록]* ({idx_d+1}~{min(idx_d+20, len(dd_df))})"]
+                            for _, r in chunk.iterrows(): lines.append(f"• *{r['Name']}* (`{r['Code']}`): {r['Close']:,.0f}원 | 일평균: {r.get(f'{dl}일평균거래대금(억원)', 0)}억")
+                            send_telegram_message("\n".join(lines)); time.sleep(0.3)
+                        st.toast("텔레그램 전송 완료!", icon="🚀")
+                    st.dataframe(dd_df, use_container_width=True)
+
         else:
             # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 복합 차트 (조회 기간 100% 동기화) ====================
             is_korean = str(selected_code).isdigit() and len(str(selected_code)) == 6
@@ -523,7 +561,7 @@ try:
                 synced_price_df = display_df
                 c_min, c_max = synced_price_df.index.min(), synced_price_df.index.max()
 
-                # 🎯 [핵심] 조회 기간 범위 내로 실적 데이터(q_fin_df) 완벽 필터링 (상/하단 전체 연동)
+                # 🎯 조회 기간 범위 내로 실적 데이터 완벽 필터링
                 q_fin_df = raw_fin_df.loc[(raw_fin_df.index >= (c_min - datetime.timedelta(days=45))) & (raw_fin_df.index <= (c_max + datetime.timedelta(days=90)))].copy()
                 if q_fin_df.empty:
                     q_fin_df = raw_fin_df.copy()
@@ -538,7 +576,6 @@ try:
                     curr_dt = q_fin_df.index[i]
                     next_dt = q_fin_df.index[i+1] if (i+1 < len(q_fin_df)) else curr_dt + datetime.timedelta(days=90)
                     
-                    # 주가 차트 기간 시작점 이전으로 넘어가지 않도록 클리핑
                     eff_start = max(curr_dt, c_min)
                     eff_end = min(next_dt, c_max)
                     
@@ -552,7 +589,6 @@ try:
                 if 'Revenue_Eok' in q_fin_df.columns and len(step_x) > 0:
                     fig_ts.add_trace(go.Scatter(x=step_x, y=step_rev, mode='lines', name=f'분기 매출액 ({unit_label})', line=dict(color='#26A69A', width=2.8)), secondary_y=True)
                     
-                    # 배지 라벨
                     b_x, b_y, b_txt, b_col = [], [], [], []
                     for idx_dt, row_data in q_fin_df.iterrows():
                         mid_dt = idx_dt + datetime.timedelta(days=45)
@@ -578,7 +614,6 @@ try:
 
                 st.markdown("---")
                 
-                # 🎯 하단 차트도 조회 기간에 맞추어 완벽하게 필터링된 q_fin_df 사용
                 st.markdown(f"#### 📊 선택 기간({selected_period}) 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
                 kpi1, kpi2 = st.columns(2)
                 q_labels = [f"{d.year}-Q{(d.month-1)//3+1}" for d in q_fin_df.index]
