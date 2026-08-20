@@ -139,14 +139,14 @@ tf_config = {
     "5분봉": {"default": "1일", "options": ["1일", "3일", "5일", "1개월", "2개월"], "interval": "5m"},
     "30분봉": {"default": "5일", "options": ["5일", "1개월", "2개월"], "interval": "30m"},
     "1시간봉": {"default": "1개월", "options": ["5일", "1개월", "2개월", "6개월"], "interval": "60m"},
-    "일봉": {"default": "1년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1d"},
-    "주봉": {"default": "3년", "options": ["6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1wk"},
+    "일봉": {"default": "5년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1d"},
+    "주봉": {"default": "5년", "options": ["6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1wk"},
     "월봉": {"default": "최대(All)", "options": ["1년", "3년", "5년", "10년", "최대(All)"], "interval": "1mo"}
 }
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("⏱️ 차트 주기 & 기간")
-timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=5)
+timeframe = st.sidebar.radio("📊 차트 주기", list(tf_config.keys()), index=3)
 current_cfg = tf_config[timeframe]
 selected_period = st.sidebar.select_slider("📅 조회 기간", options=current_cfg["options"], value=current_cfg["default"])
 
@@ -196,7 +196,7 @@ def load_and_calculate_data(code, tf, period_str):
             start_d = "1990-01-01"
         else:
             days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
-            start_d = today - datetime.timedelta(days=days_calc.get(period_str, 365*10) + 400)
+            start_d = today - datetime.timedelta(days=days_calc.get(period_str, 365*5) + 400)
             
         try: df = fdr.DataReader(code, start_d)
         except Exception: df = pd.DataFrame()
@@ -223,7 +223,7 @@ def load_and_calculate_data(code, tf, period_str):
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
     if "m" not in interval and period_str != "최대(All)":
-        days_disp = days_calc.get(period_str, 365*10)
+        days_disp = days_calc.get(period_str, 365*5)
         disp_start = today - datetime.timedelta(days=days_disp)
         df = df.loc[df.index >= pd.to_datetime(disp_start)]
     return df
@@ -282,7 +282,6 @@ def fetch_single_dart_report(args):
 
 @st.cache_data(ttl=86400)
 def get_sec_cik_map():
-    """미국 SEC EDGAR 티커 -> CIK 매핑 로더"""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0'}
         r = requests.get('https://www.sec.gov/files/company_tickers.json', headers=headers, timeout=5)
@@ -290,7 +289,6 @@ def get_sec_cik_map():
             data = r.json()
             return {v['ticker'].upper(): str(v['cik_str']) for v in data.values()}
     except Exception: pass
-    # 주요 빅테크 기본 매핑
     return {
         "META": "1326801", "AAPL": "320193", "NVDA": "1045810", "TSLA": "1318605",
         "MSFT": "789019", "AMZN": "1018724", "GOOGL": "1652044", "GOOG": "1652044",
@@ -299,7 +297,6 @@ def get_sec_cik_map():
 
 @st.cache_data(ttl=7200)
 def load_sec_edgar_10y_financials(ticker_symbol):
-    """SEC EDGAR 공식 XBRL에서 미국 주식의 과거 10년+ 분기 실적(매출/영업이익/순이익) 전수 추출"""
     t_clean = ticker_symbol.upper().strip()
     cik_map = get_sec_cik_map()
     cik = cik_map.get(t_clean)
@@ -313,7 +310,6 @@ def load_sec_edgar_10y_financials(ticker_symbol):
             if resp.status_code == 200:
                 cf = resp.json().get('facts', {}).get('us-gaap', {})
                 
-                # 1. 매출액 태그 탐색
                 rev_tags = ['RevenueFromContractWithCustomerExcludingAssessedTax', 'SalesRevenueNet', 'Revenues', 'TotalRevenuesAndOtherIncome']
                 rev_data = None
                 for tag in rev_tags:
@@ -321,7 +317,6 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                         rev_data = cf[tag]['units']['USD']
                         break
                         
-                # 2. 순이익 태그
                 net_tags = ['NetIncomeLoss', 'ProfitLoss', 'NetIncomeLossAvailableToCommonStockholdersBasic']
                 net_data = None
                 for tag in net_tags:
@@ -329,7 +324,6 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                         net_data = cf[tag]['units']['USD']
                         break
                         
-                # 3. 영업이익 태그
                 op_tags = ['OperatingIncomeLoss']
                 op_data = None
                 for tag in op_tags:
@@ -339,7 +333,6 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                         
                 q_dict = {}
                 
-                # 분기별 10-Q 및 10-K 파싱
                 def parse_series(data_list, val_key):
                     if not data_list: return
                     for item in data_list:
@@ -348,11 +341,8 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                         end_dt = item.get('end', '')
                         val = item.get('val', np.nan)
                         
-                        # 분기 보고서(10-Q) 또는 10-K
                         if form in ['10-Q', '10-K'] and end_dt:
-                            # 3개월 분기 실적 (또는 frame이 분기인 경우)
                             start_dt = item.get('start', '')
-                            # 시작일과 종료일 차이가 60~110일 사이인 경우 = 3개월 분기 실적
                             is_pure_quarter = False
                             if start_dt and end_dt:
                                 try:
@@ -365,7 +355,7 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                             if is_pure_quarter and pd.notna(val):
                                 dt_idx = pd.to_datetime(end_dt)
                                 if dt_idx not in q_dict: q_dict[dt_idx] = {}
-                                q_dict[dt_idx][val_key] = val / 1_000_000_000 # Billion USD
+                                q_dict[dt_idx][val_key] = val / 1_000_000_000
 
                 parse_series(rev_data, 'Revenue_Eok')
                 parse_series(net_data, 'NetIncome_Eok')
@@ -373,7 +363,6 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                 
                 if q_dict:
                     df_sec = pd.DataFrame.from_dict(q_dict, orient='index').sort_index()
-                    # 4분기 이상이면 YoY 및 마진율 계산
                     if 'Revenue_Eok' in df_sec.columns:
                         df_sec['Rev_YoY'] = df_sec['Revenue_Eok'].pct_change(4) * 100
                         df_sec['Rev_YoY'] = df_sec['Rev_YoY'].fillna(df_sec['Revenue_Eok'].pct_change(1) * 100)
@@ -385,7 +374,6 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                     return df_sec.dropna(how='all')
         except Exception: pass
 
-    # 야후 파이낸스 폴백
     try:
         q_fin = yf.Ticker(ticker_symbol).quarterly_financials
         if q_fin is not None and not q_fin.empty:
@@ -408,7 +396,6 @@ def load_sec_edgar_10y_financials(ticker_symbol):
 
 @st.cache_data(ttl=7200)
 def load_global_full_history_financials(code):
-    """국내(DART 2015~현재) 및 해외(SEC EDGAR 10+개년) 전수 실적 통합 분기 로더"""
     is_korean = str(code).isdigit() and len(str(code)) == 6
     if is_korean:
         dart_key = st.secrets.get("DART_API_KEY", "").strip()
@@ -455,7 +442,6 @@ def load_global_full_history_financials(code):
                 final_df['Net_Margin'] = (final_df['NetIncome_Eok'] / final_df['Revenue_Eok']) * 100
             return final_df.dropna(how='all')
     else:
-        # 해외 주식 (미국 주식) -> SEC EDGAR 10+년 호출
         return load_sec_edgar_10y_financials(code)
 
     return pd.DataFrame()
@@ -520,36 +506,46 @@ try:
                 st.plotly_chart(c_fig, use_container_width=True)
 
         else:
-            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 10+개년 분기 실적 복합 차트 ====================
+            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 복합 차트 (조회 기간 100% 동기화) ====================
             is_korean = str(selected_code).isdigit() and len(str(selected_code)) == 6
             source_lbl = "금융감독원 Open DART 전자공시" if is_korean else "미국 증권거래위원회 SEC EDGAR 공식 XBRL"
             unit_label = "억원" if is_korean else "Billion USD"
 
-            st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 전 기간(10+년) 분기 실적(KPI) 오버레이 차트")
-            st.caption(f"사이드바 주기: **`{timeframe}`** | 기간: **`{selected_period}`** | 출처: **`{source_lbl}`** (10+개년 100% 순수 분기 실적)")
+            st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 분기 실적(KPI) 오버레이 차트")
+            st.caption(f"사이드바 주기: **`{timeframe}`** | 선택 기간: **`{selected_period}`** | 출처: **`{source_lbl}`** (조회 기간 완벽 동기화)")
 
-            with st.spinner(f"{source_lbl}에서 10+년 치 분기 실적 전수 수집 및 4분기 순수 실적 보정 중..."):
-                q_fin_df = load_global_full_history_financials(selected_code)
+            with st.spinner(f"{source_lbl}에서 분기 실적 수집 및 기간 동기화 중..."):
+                raw_fin_df = load_global_full_history_financials(selected_code)
 
-            if q_fin_df.empty:
+            if raw_fin_df.empty:
                 st.warning(f"'{selected_name}'의 분기 실적 데이터를 가져올 수 없습니다. 종목 티커를 확인하세요.")
             else:
                 synced_price_df = display_df
+                c_min, c_max = synced_price_df.index.min(), synced_price_df.index.max()
 
-                st.markdown(f"#### 📈 주가 & 10+년 분기 실적 스텝 오버레이 (출처: `{source_lbl}`)")
+                # 🎯 [핵심] 조회 기간 범위 내로 실적 데이터(q_fin_df) 완벽 필터링 (상/하단 전체 연동)
+                q_fin_df = raw_fin_df.loc[(raw_fin_df.index >= (c_min - datetime.timedelta(days=45))) & (raw_fin_df.index <= (c_max + datetime.timedelta(days=90)))].copy()
+                if q_fin_df.empty:
+                    q_fin_df = raw_fin_df.copy()
+
+                st.markdown(f"#### 📈 주가 & 분기 실적 스텝 오버레이 (현재 기간: `{selected_period}` | 출처: `{source_lbl}`)")
                 fig_ts = make_subplots(specs=[[{"secondary_y": True}]])
                 fig_ts.add_trace(go.Scatter(x=synced_price_df.index, y=synced_price_df['Close'], mode='lines', name=f'주가 ({timeframe})', line=dict(color='#29B6F6', width=2), fill='tozeroy', fillcolor='rgba(41, 182, 246, 0.04)'), secondary_y=False)
 
-                c_min, c_max = synced_price_df.index.min(), synced_price_df.index.max()
                 step_x, step_rev, step_net = [], [], []
 
                 for i in range(len(q_fin_df)):
                     curr_dt = q_fin_df.index[i]
                     next_dt = q_fin_df.index[i+1] if (i+1 < len(q_fin_df)) else curr_dt + datetime.timedelta(days=90)
-                    if next_dt >= c_min and curr_dt <= c_max + datetime.timedelta(days=90):
+                    
+                    # 주가 차트 기간 시작점 이전으로 넘어가지 않도록 클리핑
+                    eff_start = max(curr_dt, c_min)
+                    eff_end = min(next_dt, c_max)
+                    
+                    if eff_end >= eff_start:
                         r_val = q_fin_df['Revenue_Eok'].iloc[i] if 'Revenue_Eok' in q_fin_df.columns else np.nan
                         n_val = q_fin_df['NetIncome_Eok'].iloc[i] if 'NetIncome_Eok' in q_fin_df.columns else np.nan
-                        step_x.extend([curr_dt, next_dt])
+                        step_x.extend([eff_start, eff_end])
                         step_rev.extend([r_val, r_val])
                         step_net.extend([n_val, n_val])
 
@@ -560,7 +556,7 @@ try:
                     b_x, b_y, b_txt, b_col = [], [], [], []
                     for idx_dt, row_data in q_fin_df.iterrows():
                         mid_dt = idx_dt + datetime.timedelta(days=45)
-                        if c_min <= mid_dt <= c_max + datetime.timedelta(days=90):
+                        if c_min <= mid_dt <= (c_max + datetime.timedelta(days=45)):
                             q_name = f"Q{(idx_dt.month-1)//3+1}'{str(idx_dt.year)[-2:]}"
                             yoy_val = row_data.get('Rev_YoY', np.nan)
                             b_x.append(mid_dt)
@@ -581,7 +577,9 @@ try:
                 st.plotly_chart(fig_ts, use_container_width=True)
 
                 st.markdown("---")
-                st.markdown("#### 📊 과거 10+년 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
+                
+                # 🎯 하단 차트도 조회 기간에 맞추어 완벽하게 필터링된 q_fin_df 사용
+                st.markdown(f"#### 📊 선택 기간({selected_period}) 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
                 kpi1, kpi2 = st.columns(2)
                 q_labels = [f"{d.year}-Q{(d.month-1)//3+1}" for d in q_fin_df.index]
 
@@ -590,7 +588,7 @@ try:
                     if 'Revenue_Eok' in q_fin_df.columns: fig_k1.add_trace(go.Bar(x=q_labels, y=q_fin_df['Revenue_Eok'], name=f'매출액', marker_color='#29B6F6'))
                     if 'OperatingIncome_Eok' in q_fin_df.columns: fig_k1.add_trace(go.Bar(x=q_labels, y=q_fin_df['OperatingIncome_Eok'], name=f'영업이익', marker_color='#26A69A'))
                     if 'NetIncome_Eok' in q_fin_df.columns: fig_k1.add_trace(go.Bar(x=q_labels, y=q_fin_df['NetIncome_Eok'], name=f'순이익', marker_color='#FFB74D'))
-                    fig_k1.update_layout(title=f"10+년 분기별 매출/영업이익/순이익 ({unit_label})", height=360, barmode='group', template="plotly_dark", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", margin=dict(l=10, r=10, t=40, b=10))
+                    fig_k1.update_layout(title=f"선택 기간({selected_period}) 분기별 매출/영업이익/순이익 ({unit_label})", height=360, barmode='group', template="plotly_dark", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", margin=dict(l=10, r=10, t=40, b=10))
                     st.plotly_chart(fig_k1, use_container_width=True)
 
                 with kpi2:
@@ -599,10 +597,10 @@ try:
                     if 'Rev_YoY' in q_fin_df.columns:
                         yoy_cols = ['#26A69A' if v >= 0 else '#EF5350' for v in q_fin_df['Rev_YoY'].fillna(0)]
                         fig_k2.add_trace(go.Bar(x=q_labels, y=q_fin_df['Rev_YoY'], name='매출 YoY 성장률(%)', marker_color=yoy_cols, opacity=0.4), secondary_y=True)
-                    fig_k2.update_layout(title="순이익률(%) 및 매출 YoY 성장률(%)", height=360, template="plotly_dark", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", margin=dict(l=10, r=10, t=40, b=10))
+                    fig_k2.update_layout(title=f"선택 기간({selected_period}) 순이익률(%) 및 매출 YoY 성장률(%)", height=360, template="plotly_dark", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", margin=dict(l=10, r=10, t=40, b=10))
                     st.plotly_chart(fig_k2, use_container_width=True)
 
-                with st.expander("📋 10+년 분기 실적 원본 데이터 확인"):
+                with st.expander(f"📋 선택 기간({selected_period}) 분기 실적 원본 데이터 확인"):
                     disp_t = q_fin_df.copy()
                     disp_t.index = [d.strftime('%Y-%m-%d') for d in disp_t.index]
                     st.dataframe(disp_t.style.format({'Revenue_Eok': '{:,.2f}', 'OperatingIncome_Eok': '{:,.2f}', 'NetIncome_Eok': '{:,.2f}', 'Net_Margin': '{:.1f}%', 'Rev_YoY': '{:+.1f}%'}), use_container_width=True)
