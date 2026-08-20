@@ -101,7 +101,7 @@ def get_krx_stocks():
 
 def get_us_stocks():
     return {
-        "META - Meta Platforms": "META", "TSLA - Tesla": "TSLA", "AAPL - Apple": "AAPL",
+        "TSLA - Tesla": "TSLA", "META - Meta Platforms": "META", "AAPL - Apple": "AAPL",
         "GOOGL - Alphabet (Google)": "GOOGL", "AMZN - Amazon": "AMZN", "NVDA - NVIDIA": "NVDA",
         "MSFT - Microsoft": "MSFT", "PLTR - Palantir Technologies": "PLTR", "AMD - Advanced Micro Devices": "AMD",
         "NFLX - Netflix": "NFLX", "INTC - Intel": "INTC", "CPNG - Coupang": "CPNG", "LLY - Eli Lilly": "LLY"
@@ -130,12 +130,12 @@ if input_mode == "목록에서 선택":
     selected_name = st.sidebar.selectbox("🔎 종목/자산 선택", options=options_list, index=selected_idx)
     selected_code = STOCKS[selected_name]
 else:
-    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: META, AAPL, 005930, 284740)", value="META").strip()
+    direct_ticker = st.sidebar.text_input("📝 티커 직접 입력 (예: TSLA, META, AAPL, 005930, 284740)", value="TSLA").strip()
     selected_name = f"Custom: {direct_ticker}"
     selected_code = direct_ticker
     currency_symbol = "원" if (direct_ticker.isdigit() or "KRW" in direct_ticker) else "USD"
 
-# ⏱️ 일봉: 1년 기본, 주봉: 3년 기본, 월봉: 5년 기본 설정
+# ⏱️ 일봉(1년), 주봉(3년), 월봉(5년) 기본
 tf_config = {
     "일봉": {"default": "1년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1d"},
     "주봉": {"default": "3년", "options": ["6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1wk"},
@@ -271,13 +271,14 @@ def get_sec_cik_map():
             return {v['ticker'].upper(): str(v['cik_str']) for v in data.values()}
     except Exception: pass
     return {
-        "META": "1326801", "AAPL": "320193", "NVDA": "1045810", "TSLA": "1318605",
+        "TSLA": "1318605", "META": "1326801", "AAPL": "320193", "NVDA": "1045810",
         "MSFT": "789019", "AMZN": "1018724", "GOOGL": "1652044", "GOOG": "1652044",
         "PLTR": "1321655", "AMD": "2488", "NFLX": "1065280", "INTC": "50863", "CPNG": "1834584", "LLY": "59478"
     }
 
 @st.cache_data(ttl=7200)
 def load_sec_edgar_10y_financials(ticker_symbol):
+    """SEC EDGAR 다중 태그 전수 병합으로 테슬라 및 미국 기업의 10+년 분기 실적 끊김 없이 복원"""
     t_clean = ticker_symbol.upper().strip()
     cik_map = get_sec_cik_map()
     cik = cik_map.get(t_clean)
@@ -285,62 +286,68 @@ def load_sec_edgar_10y_financials(ticker_symbol):
     if cik:
         try:
             url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik.zfill(10)}.json"
-            headers = {'User-Agent': 'PersonalDashboardAdmin/2.0 (contact@investortool.com)'}
+            headers = {'User-Agent': 'PersonalFinanceTerminal/2.1 (admin@globalinvest.org)'}
             resp = requests.get(url, headers=headers, timeout=8)
             
             if resp.status_code == 200:
                 cf = resp.json().get('facts', {}).get('us-gaap', {})
-                
-                rev_tags = ['RevenueFromContractWithCustomerExcludingAssessedTax', 'SalesRevenueNet', 'Revenues', 'TotalRevenuesAndOtherIncome']
-                rev_data = None
-                for tag in rev_tags:
-                    if tag in cf and 'USD' in cf[tag].get('units', {}):
-                        rev_data = cf[tag]['units']['USD']
-                        break
-                        
-                net_tags = ['NetIncomeLoss', 'ProfitLoss', 'NetIncomeLossAvailableToCommonStockholdersBasic']
-                net_data = None
-                for tag in net_tags:
-                    if tag in cf and 'USD' in cf[tag].get('units', {}):
-                        net_data = cf[tag]['units']['USD']
-                        break
-                        
-                op_tags = ['OperatingIncomeLoss']
-                op_data = None
-                for tag in op_tags:
-                    if tag in cf and 'USD' in cf[tag].get('units', {}):
-                        op_data = cf[tag]['units']['USD']
-                        break
-                        
                 q_dict = {}
-                
-                def parse_series(data_list, val_key):
-                    if not data_list: return
-                    for item in data_list:
-                        form = item.get('form', '')
-                        fp = item.get('fp', '')
-                        end_dt = item.get('end', '')
-                        val = item.get('val', np.nan)
-                        
-                        if form in ['10-Q', '10-K'] and end_dt:
-                            start_dt = item.get('start', '')
-                            is_pure_quarter = False
-                            if start_dt and end_dt:
-                                try:
-                                    d_diff = (pd.to_datetime(end_dt) - pd.to_datetime(start_dt)).days
-                                    if 60 <= d_diff <= 110: is_pure_quarter = True
-                                except Exception: pass
-                            elif fp in ['Q1', 'Q2', 'Q3', 'Q4']:
-                                is_pure_quarter = True
-                                
-                            if is_pure_quarter and pd.notna(val):
-                                dt_idx = pd.to_datetime(end_dt)
-                                if dt_idx not in q_dict: q_dict[dt_idx] = {}
-                                q_dict[dt_idx][val_key] = val / 1_000_000_000
 
-                parse_series(rev_data, 'Revenue_Eok')
-                parse_series(net_data, 'NetIncome_Eok')
-                parse_series(op_data, 'OperatingIncome_Eok')
+                # 1. 다중 매출 태그 목록 (과거부터 최신까지 사용된 모든 태그 순회 병합)
+                rev_tags = [
+                    'RevenueFromContractWithCustomerExcludingAssessedTax',
+                    'SalesRevenueNet',
+                    'Revenues',
+                    'TotalRevenuesAndOtherIncome',
+                    'SalesRevenueGoodsNet',
+                    'AutomotiveRevenues'
+                ]
+                
+                # 2. 다중 순이익 태그 목록
+                net_tags = [
+                    'NetIncomeLoss',
+                    'ProfitLoss',
+                    'NetIncomeLossAvailableToCommonStockholdersBasic'
+                ]
+                
+                # 3. 다중 영업이익 태그 목록
+                op_tags = [
+                    'OperatingIncomeLoss'
+                ]
+
+                def parse_multi_tags(tag_list, val_key):
+                    for tag in tag_list:
+                        if tag in cf and 'USD' in cf[tag].get('units', {}):
+                            items = cf[tag]['units']['USD']
+                            for item in items:
+                                form = item.get('form', '')
+                                fp = item.get('fp', '')
+                                end_dt = item.get('end', '')
+                                val = item.get('val', np.nan)
+                                start_dt = item.get('start', '')
+                                
+                                if form in ['10-Q', '10-K'] and end_dt and pd.notna(val):
+                                    is_quarter = False
+                                    if start_dt:
+                                        try:
+                                            diff_d = (pd.to_datetime(end_dt) - pd.to_datetime(start_dt)).days
+                                            if 60 <= diff_d <= 115:
+                                                is_quarter = True
+                                        except Exception: pass
+                                    elif fp in ['Q1', 'Q2', 'Q3', 'Q4']:
+                                        is_quarter = True
+                                        
+                                    if is_quarter:
+                                        dt_idx = pd.to_datetime(end_dt)
+                                        if dt_idx not in q_dict:
+                                            q_dict[dt_idx] = {}
+                                        # 이미 값이 없거나 더 최신 공시 형태일 때 덮어쓰기/보충
+                                        if val_key not in q_dict[dt_idx] or pd.isna(q_dict[dt_idx][val_key]):
+                                            q_dict[dt_idx][val_key] = val / 1_000_000_000
+
+                parse_multi_tags(rev_tags, 'Revenue_Eok')
+                parse_multi_tags(net_tags, 'NetIncome_Eok')
+                parse_multi_tags(op_tags, 'OperatingIncome_Eok')
                 
                 if q_dict:
                     df_sec = pd.DataFrame.from_dict(q_dict, orient='index').sort_index()
@@ -355,6 +362,7 @@ def load_sec_edgar_10y_financials(ticker_symbol):
                     return df_sec.dropna(how='all')
         except Exception: pass
 
+    # 야후 파이낸스 폴백
     try:
         q_fin = yf.Ticker(ticker_symbol).quarterly_financials
         if q_fin is not None and not q_fin.empty:
@@ -589,7 +597,7 @@ try:
                 if 'Revenue_Eok' in q_fin_df.columns and len(step_x) > 0:
                     fig_ts.add_trace(go.Scatter(x=step_x, y=step_rev, mode='lines', name=f'분기 매출액 ({unit_label})', line=dict(color='#26A69A', width=2.8)), secondary_y=True)
                     
-                    b_x, b_y, b_txt, b_col = [], [], [], []
+                    b_x, b_y, b_txt, b_col = [], [], []
                     for idx_dt, row_data in q_fin_df.iterrows():
                         mid_dt = idx_dt + datetime.timedelta(days=45)
                         if c_min <= mid_dt <= (c_max + datetime.timedelta(days=45)):
