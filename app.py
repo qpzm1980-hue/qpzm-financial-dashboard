@@ -135,6 +135,7 @@ else:
     selected_code = direct_ticker
     currency_symbol = "원" if (direct_ticker.isdigit() or "KRW" in direct_ticker) else "USD"
 
+# ⏱️ 일봉: 1년, 주봉: 3년, 월봉: 5년 기본
 tf_config = {
     "일봉": {"default": "1년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1d"},
     "주봉": {"default": "3년", "options": ["6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1wk"},
@@ -212,7 +213,7 @@ def load_and_calculate_data(code, tf, period_str):
         df = df.loc[df.index >= pd.to_datetime(disp_start)]
     return df
 
-# ==================== 🏛️ 국내 DART + 네이버/FnGuide 2중 하이브리드 엔진 ====================
+# ==================== 🏛️ 국내 DART 2015~현재 전 기간 완벽 추출 엔진 ====================
 @st.cache_data(ttl=86400)
 def get_dart_corp_code_map(dart_key):
     try:
@@ -234,39 +235,53 @@ def get_dart_corp_code_map(dart_key):
 
 def fetch_single_dart_report(args):
     dart_key, corp_code, y, r_code, end_day, q_num = args
-    # 1. fnlttSinglAcntAll (전체 계정) 및 fnlttSinglAcnt (주요 계정) 듀얼 시도
-    for api_type in ["fnlttSinglAcntAll", "fnlttSinglAcnt"]:
+    
+    # 🎯 [핵심 수정] fnlttSinglAcntAll에 필수 fs_div(CFS/OFS) 파라미터 전달
+    for fs_div in ["CFS", "OFS"]:
         try:
-            url = f"https://opendart.fss.or.kr/api/{api_type}.json?crtfc_key={dart_key}&corp_code={corp_code}&bsns_year={y}&reprt_code={r_code}"
-            resp = requests.get(url, timeout=4).json()
+            url = f"https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key={dart_key}&corp_code={corp_code}&bsns_year={y}&reprt_code={r_code}&fs_div={fs_div}"
+            resp = requests.get(url, timeout=5).json()
+            
+            # fnlttSinglAcntAll이 실패하면 주요계정 API로 폴백
+            if resp.get("status") != "000" or "list" not in resp:
+                url_alt = f"https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key={dart_key}&corp_code={corp_code}&bsns_year={y}&reprt_code={r_code}"
+                resp = requests.get(url_alt, timeout=4).json()
+
             if resp.get("status") == "000" and "list" in resp:
                 items = resp["list"]
-                items_cfs = [it for it in items if it.get("fs_div") == "CFS"]
-                target_items = items_cfs if items_cfs else items
-                
                 rev, op, net = np.nan, np.nan, np.nan
                 
-                for it in target_items:
+                for it in items:
                     acc_nm = str(it.get("account_nm", "")).replace(" ", "").strip()
                     val_str = str(it.get("thstrm_amount", "0")).replace(",", "")
                     val_num = pd.to_numeric(val_str, errors='coerce')
                     
+                    # 3개월 분기액(thstrm_q_amount)이 존재하면 우선 채택
+                    if "thstrm_q_amount" in it and pd.notna(it.get("thstrm_q_amount")):
+                        q_str = str(it.get("thstrm_q_amount", "")).replace(",", "")
+                        q_num_val = pd.to_numeric(q_str, errors='coerce')
+                        if pd.notna(q_num_val):
+                            val_num = q_num_val
+
+                    # 매출액 계정 매핑
                     if pd.isna(rev):
                         if any(acc_nm == k for k in ["수익(매출액)", "매출액", "영업수익", "수익", "매출", "보험수익", "이자수익"]):
                             rev = val_num
                         elif re.search(r'^(수익\(매출액\)|매출액|영업수익|매출|수익)$', acc_nm):
                             rev = val_num
 
+                    # 영업이익 계정 매핑
                     if pd.isna(op):
                         if any(acc_nm == k for k in ["영업이익", "영업이익(손실)", "영업손익"]):
                             op = val_num
                         elif "영업이익" in acc_nm or "영업손익" in acc_nm:
                             op = val_num
 
+                    # 당기순이익 계정 매핑
                     if pd.isna(net):
-                        if any(acc_nm == k for k in ["당기순이익", "당기순이익(손실)", "분기순이익", "분기순이익(손실)", "반기순이익", "반기순이익(손실)", "연결당기순이익", "지배기업의소유주지분순이익"]):
+                        if any(acc_nm == k for k in ["당기순이익", "당기순이익(손실)", "분기순이익", "분기순이익(손실)", "반기순이익", "반기순이익(손실)", "연결당기순이익", "지배기업소유주지분순이익"]):
                             net = val_num
-                        elif "당기순이익" in acc_nm or "분기순이익" in acc_nm or "반기순이익" in acc_nm:
+                        elif "당기순이익" in acc_nm or "분기순이익" in acc_nm:
                             net = val_num
 
                 if pd.notna(rev) or pd.notna(net):
@@ -284,7 +299,6 @@ def fetch_single_dart_report(args):
 
 @st.cache_data(ttl=3600)
 def load_korean_backup_financials(code):
-    """DART API 지연/차단 시 네이버 및 FnGuide 다중 파싱 백업망"""
     res_dict = {}
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
     try:
@@ -329,7 +343,6 @@ def get_sec_cik_map():
 
 @st.cache_data(ttl=7200)
 def load_sec_edgar_10y_financials(ticker_symbol):
-    """SEC EDGAR 다중 태그 전수 병합으로 미국 기업의 10+년 분기 실적 복원"""
     t_clean = ticker_symbol.upper().strip()
     cik_map = get_sec_cik_map()
     cik = cik_map.get(t_clean)
@@ -440,13 +453,12 @@ def load_global_full_history_financials(code):
                 reports = [("11013", "03-31", 1), ("11012", "06-30", 2), ("11014", "09-30", 3), ("11011", "12-31", 4)]
                 task_list = [(dart_key, corp_code, y, r_code, end_day, q_num) for y in years for r_code, end_day, q_num in reports]
                 
-                # 안정적인 Rate Limit 관리 (동시 요청 6개로 최적화)
                 with ThreadPoolExecutor(max_workers=6) as executor:
                     results = executor.map(fetch_single_dart_report, task_list)
                 for res in results:
                     if res is not None: res_dict[res[0]] = res[1]
 
-        # DART 결과가 부족할 경우 네이버/FnGuide 백업망 결합
+        # 백업망 보완
         if not res_dict or len(res_dict) < 3:
             backup_data = load_korean_backup_financials(code)
             for k, v in backup_data.items():
@@ -731,7 +743,7 @@ try:
             unit_label = "억원" if is_korean else "Billion USD"
 
             st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 분기 실적(KPI) 오버레이 차트")
-            st.caption(f"사이드바 주기: **`{timeframe}`** | 선택 기간: **`{selected_period}`** | 출처: **`{source_lbl}`** (조회 기간 완벽 동기화)")
+            st.caption(f"사이드바 주기: **`{timeframe}`** | 선택 기간: **`{selected_period}`** | 출처: **`{source_lbl}`** (2015~현재 전 기간 연동)")
 
             with st.spinner(f"{source_lbl}에서 분기 실적 수집 및 기간 동기화 중..."):
                 raw_fin_df = load_global_full_history_financials(selected_code)
