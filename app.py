@@ -138,9 +138,9 @@ tf_config = {
     "5분봉": {"default": "1일", "options": ["1일", "3일", "5일", "1개월", "2개월"], "interval": "5m"},
     "30분봉": {"default": "5일", "options": ["5일", "1개월", "2개월"], "interval": "30m"},
     "1시간봉": {"default": "1개월", "options": ["5일", "1개월", "2개월", "6개월"], "interval": "60m"},
-    "일봉": {"default": "1년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년"], "interval": "1d"},
-    "주봉": {"default": "3년", "options": ["6개월", "1년", "3년", "5년", "10년"], "interval": "1wk"},
-    "월봉": {"default": "10년", "options": ["1년", "3년", "5년", "10년", "최대(All)"], "interval": "1mo"}
+    "일봉": {"default": "1년", "options": ["1달", "6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1d"},
+    "주봉": {"default": "3년", "options": ["6개월", "1년", "3년", "5년", "10년", "최대(All)"], "interval": "1wk"},
+    "월봉": {"default": "최대(All)", "options": ["1년", "3년", "5년", "10년", "최대(All)"], "interval": "1mo"}
 }
 
 st.sidebar.markdown("---")
@@ -157,7 +157,7 @@ show_rsi = st.sidebar.checkbox("RSI (14)", value=True)
 show_macd = st.sidebar.checkbox("MACD (12, 26, 9)", value=True)
 
 if "DART_API_KEY" in st.secrets:
-    st.sidebar.success("🏛️ Open DART 최대 10년 연동 활성화")
+    st.sidebar.success("🏛️ Open DART 전 기간(2015~현재) 연동 활성화")
 
 if st.sidebar.button("🔄 최신 시세 강제 갱신"):
     st.cache_data.clear()
@@ -169,7 +169,7 @@ period_map_yf = {"1일": "1d", "3일": "3d", "5일": "5d", "1달": "1mo", "1개�
 @st.cache_data(ttl=60)
 def load_and_calculate_data(code, tf, period_str):
     interval = tf_config[tf]["interval"]
-    yf_period = period_map_yf.get(period_str, "10y")
+    yf_period = period_map_yf.get(period_str, "max")
 
     if "m" in interval:
         df = pd.DataFrame()
@@ -191,8 +191,12 @@ def load_and_calculate_data(code, tf, period_str):
         if df.index.tz is not None: df.index = df.index.tz_localize(None)
     else:
         today = datetime.date.today()
-        days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10, "최대(All)": 365*20}
-        start_d = today - datetime.timedelta(days=days_calc.get(period_str, 365*10) + 400)
+        if period_str == "최대(All)":
+            start_d = "1990-01-01"
+        else:
+            days_calc = {"1달": 30, "6개월": 180, "1년": 365, "3년": 365*3, "5년": 365*5, "10년": 365*10}
+            start_d = today - datetime.timedelta(days=days_calc.get(period_str, 365*10) + 400)
+            
         try: df = fdr.DataReader(code, start_d)
         except Exception: df = pd.DataFrame()
         if df.empty: return df
@@ -218,11 +222,12 @@ def load_and_calculate_data(code, tf, period_str):
     df['MACD_Hist'] = df['MACD'] - df['MACD_Signal']
 
     if "m" not in interval and period_str != "최대(All)":
-        disp_start = today - datetime.timedelta(days=days_calc.get(period_str, 365*10))
+        days_disp = days_calc.get(period_str, 365*10)
+        disp_start = today - datetime.timedelta(days=days_disp)
         df = df.loc[df.index >= pd.to_datetime(disp_start)]
     return df
 
-# ==================== 🏛️ Open DART 최대 10년 분기 실적 + 4분기 순수 실적 보정 ====================
+# ==================== 🏛️ Open DART 2015년~현재 전 기간 분기 실적 전수 추출 ====================
 @st.cache_data(ttl=86400)
 def get_dart_corp_code_map(dart_key):
     try:
@@ -275,8 +280,8 @@ def fetch_single_dart_report(args):
     return None
 
 @st.cache_data(ttl=7200)
-def load_dart_10y_quarterly_financials(code):
-    """최대 10개년(2016~현재) DART 분기 실적 병렬 수집 및 4분기 순수 차감 보정"""
+def load_dart_full_history_quarterly_financials(code):
+    """2015년부터 현재까지 DART 전 기간 분기 실적 전수 수집 및 4분기 순수 차감 정규화"""
     dart_key = st.secrets.get("DART_API_KEY", "").strip()
     res_dict = {}
     
@@ -286,8 +291,8 @@ def load_dart_10y_quarterly_financials(code):
         
         if corp_code:
             curr_year = datetime.date.today().year
-            # 10개년 연도 생성 (예: 2016~2026)
-            years = list(range(curr_year - 9, curr_year + 1))
+            # 2015년부터 현재 연도까지 전체 생성 (최대 12개년)
+            years = list(range(2015, curr_year + 1))
             reports = [("11013", "03-31", 1), ("11012", "06-30", 2), ("11014", "09-30", 3), ("11011", "12-31", 4)]
             
             task_list = []
@@ -295,7 +300,7 @@ def load_dart_10y_quarterly_financials(code):
                 for r_code, end_day, q_num in reports:
                     task_list.append((dart_key, corp_code, y, r_code, end_day, q_num))
                     
-            with ThreadPoolExecutor(max_workers=8) as executor:
+            with ThreadPoolExecutor(max_workers=10) as executor:
                 results = executor.map(fetch_single_dart_report, task_list)
                 
             for res in results:
@@ -303,7 +308,7 @@ def load_dart_10y_quarterly_financials(code):
                     dt_key, data = res
                     res_dict[dt_key] = data
 
-    # 4분기 솟구침 보정 및 순수 분기(3개월) 전환
+    # 4분기 솟구침 보정 및 순수 분기(3개월 단위) 정규화
     if res_dict:
         raw_df = pd.DataFrame.from_dict(res_dict, orient='index').sort_index()
         pure_dict = {}
@@ -311,7 +316,6 @@ def load_dart_10y_quarterly_financials(code):
         for y_val in raw_df['year'].unique():
             y_df = raw_df[raw_df['year'] == y_val].sort_values(by='q_num')
             
-            # 연간 누적 차감 계산 (1분기=1분기, 2분기=누적-1분기, 3분기=누적-2분기누적, 4분기=연간누적-3분기누적)
             q1_row = y_df[y_df['q_num'] == 1]
             q2_row = y_df[y_df['q_num'] == 2]
             q3_row = y_df[y_df['q_num'] == 3]
@@ -325,42 +329,41 @@ def load_dart_10y_quarterly_financials(code):
                     'OperatingIncome_Eok': q1_row['OperatingIncome_Eok'].iloc[0],
                     'NetIncome_Eok': q1_row['NetIncome_Eok'].iloc[0]
                 }
-            # Q2
+            # Q2 (반기 누적에서 1분기 차감)
             if not q2_row.empty:
                 dt2 = q2_row.index[0]
                 q1_r = q1_row['Revenue_Eok'].iloc[0] if not q1_row.empty else 0
                 q1_o = q1_row['OperatingIncome_Eok'].iloc[0] if not q1_row.empty else 0
                 q1_n = q1_row['NetIncome_Eok'].iloc[0] if not q1_row.empty else 0
                 pure_dict[dt2] = {
-                    'Revenue_Eok': q2_row['Revenue_Eok'].iloc[0] - q1_r if q2_row['Revenue_Eok'].iloc[0] > q1_r else q2_row['Revenue_Eok'].iloc[0],
+                    'Revenue_Eok': max(0.0, q2_row['Revenue_Eok'].iloc[0] - q1_r) if q2_row['Revenue_Eok'].iloc[0] > q1_r else q2_row['Revenue_Eok'].iloc[0],
                     'OperatingIncome_Eok': q2_row['OperatingIncome_Eok'].iloc[0] - q1_o,
                     'NetIncome_Eok': q2_row['NetIncome_Eok'].iloc[0] - q1_n
                 }
-            # Q3
+            # Q3 (3분기 누적에서 반기 누적 차감)
             if not q3_row.empty:
                 dt3 = q3_row.index[0]
                 q2_cum_r = q2_row['Revenue_Eok'].iloc[0] if not q2_row.empty else 0
                 q2_cum_o = q2_row['OperatingIncome_Eok'].iloc[0] if not q2_row.empty else 0
                 q2_cum_n = q2_row['NetIncome_Eok'].iloc[0] if not q2_row.empty else 0
                 pure_dict[dt3] = {
-                    'Revenue_Eok': q3_row['Revenue_Eok'].iloc[0] - q2_cum_r if q3_row['Revenue_Eok'].iloc[0] > q2_cum_r else q3_row['Revenue_Eok'].iloc[0],
+                    'Revenue_Eok': max(0.0, q3_row['Revenue_Eok'].iloc[0] - q2_cum_r) if q3_row['Revenue_Eok'].iloc[0] > q2_cum_r else q3_row['Revenue_Eok'].iloc[0],
                     'OperatingIncome_Eok': q3_row['OperatingIncome_Eok'].iloc[0] - q2_cum_o,
                     'NetIncome_Eok': q3_row['NetIncome_Eok'].iloc[0] - q2_cum_n
                 }
-            # Q4 (연간 사업보고서에서 3분기 누적 차감 -> 4분기 솟구침 완벽 해결)
+            # Q4 (연간 사업보고서에서 3분기 누적 차감 -> 4분기 솟구침 완벽 제거)
             if not q4_row.empty:
                 dt4 = q4_row.index[0]
                 q3_cum_r = q3_row['Revenue_Eok'].iloc[0] if not q3_row.empty else (q2_row['Revenue_Eok'].iloc[0] if not q2_row.empty else 0)
                 q3_cum_o = q3_row['OperatingIncome_Eok'].iloc[0] if not q3_row.empty else (q2_row['OperatingIncome_Eok'].iloc[0] if not q2_row.empty else 0)
                 q3_cum_n = q3_row['NetIncome_Eok'].iloc[0] if not q3_row.empty else (q2_row['NetIncome_Eok'].iloc[0] if not q2_row.empty else 0)
                 
-                # 연간 매출액이 3분기 누적보다 클 때만 순수 4분기 차감
                 pure_r = q4_row['Revenue_Eok'].iloc[0] - q3_cum_r if (q4_row['Revenue_Eok'].iloc[0] > q3_cum_r and q3_cum_r > 0) else q4_row['Revenue_Eok'].iloc[0] / 4
                 pure_o = q4_row['OperatingIncome_Eok'].iloc[0] - q3_cum_o if q3_cum_o != 0 else q4_row['OperatingIncome_Eok'].iloc[0]
                 pure_n = q4_row['NetIncome_Eok'].iloc[0] - q3_cum_n if q3_cum_n != 0 else q4_row['NetIncome_Eok'].iloc[0]
                 
                 pure_dict[dt4] = {
-                    'Revenue_Eok': pure_r,
+                    'Revenue_Eok': max(0.0, pure_r),
                     'OperatingIncome_Eok': pure_o,
                     'NetIncome_Eok': pure_n
                 }
@@ -376,7 +379,7 @@ def load_dart_10y_quarterly_financials(code):
             final_df['Net_Margin'] = (final_df['NetIncome_Eok'] / final_df['Revenue_Eok']) * 100
         return final_df.dropna(how='all')
 
-    # 해외 주식 (미국) -> Yahoo Finance
+    # 해외 주식 (미국) -> Yahoo Finance 분기 전체
     try:
         q_fin = yf.Ticker(code).quarterly_financials
         if q_fin is not None and not q_fin.empty:
@@ -457,23 +460,23 @@ try:
                 st.plotly_chart(c_fig, use_container_width=True)
 
         else:
-            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 최대 10년 분기 실적 복합 차트 ====================
-            st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 과거 10개년 분기 실적(KPI) 오버레이 차트")
-            st.caption(f"사이드바 주기: **`{timeframe}`** | 기간: **`{selected_period}`** | 공식 전자공시(Open DART) **최대 10개년(40개 분기)** 순수 실적 보정 연동")
+            # ==================== 🏢 5번째 탭: TrendSpider 펀더멘털 & 전 기간(2015~현재) 실적 복합 차트 ====================
+            st.markdown(f"### 🏢 {selected_name} - 펀더멘털 & 전 기간 분기 실적(KPI) 오버레이 차트")
+            st.caption(f"사이드바 주기: **`{timeframe}`** | 기간: **`{selected_period}`** | 공식 전자공시(Open DART) **2015년~현재 전 분기** 100% 순수 실적 연동")
 
             is_korean = str(selected_code).isdigit() and len(str(selected_code)) == 6
-            source_lbl = "금융감독원 Open DART 전자공시 최대 10개년 실적" if is_korean else "Yahoo Finance 분기 실적"
+            source_lbl = "금융감독원 Open DART 전자공시 전 기간(2015~현재) 실적" if is_korean else "Yahoo Finance 분기 실적"
 
             with st.spinner(f"{source_lbl} 로드 및 4분기 순수 실적 보정 중..."):
-                q_fin_df = load_dart_10y_quarterly_financials(selected_code)
+                q_fin_df = load_dart_full_history_quarterly_financials(selected_code)
 
             if q_fin_df.empty:
-                st.warning(f"'{selected_name}'의 10개년 분기 실적 데이터를 가져올 수 없습니다. DART API Key를 확인하세요.")
+                st.warning(f"'{selected_name}'의 분기 실적 데이터를 가져올 수 없습니다. DART API Key를 확인하세요.")
             else:
                 unit_label = "억원" if is_korean else "Billion USD"
                 synced_price_df = display_df
 
-                st.markdown(f"#### 📈 주가 & 10개년 분기 실적 스텝 오버레이 (출처: `{source_lbl}`)")
+                st.markdown(f"#### 📈 주가 & 분기 실적 스텝 오버레이 (출처: `{source_lbl}`)")
                 fig_ts = make_subplots(specs=[[{"secondary_y": True}]])
                 fig_ts.add_trace(go.Scatter(x=synced_price_df.index, y=synced_price_df['Close'], mode='lines', name=f'주가 ({timeframe})', line=dict(color='#29B6F6', width=2), fill='tozeroy', fillcolor='rgba(41, 182, 246, 0.04)'), secondary_y=False)
 
@@ -518,7 +521,7 @@ try:
                 st.plotly_chart(fig_ts, use_container_width=True)
 
                 st.markdown("---")
-                st.markdown("#### 📊 과거 10개년 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
+                st.markdown("#### 📊 전 기간 분기 실적 세부 지표 & 마진율 (Segments & KPIs)")
                 kpi1, kpi2 = st.columns(2)
                 q_labels = [f"{d.year}-Q{(d.month-1)//3+1}" for d in q_fin_df.index]
 
@@ -527,7 +530,7 @@ try:
                     if 'Revenue_Eok' in q_fin_df.columns: fig_k1.add_trace(go.Bar(x=q_labels, y=q_fin_df['Revenue_Eok'], name=f'매출액', marker_color='#29B6F6'))
                     if 'OperatingIncome_Eok' in q_fin_df.columns: fig_k1.add_trace(go.Bar(x=q_labels, y=q_fin_df['OperatingIncome_Eok'], name=f'영업이익', marker_color='#26A69A'))
                     if 'NetIncome_Eok' in q_fin_df.columns: fig_k1.add_trace(go.Bar(x=q_labels, y=q_fin_df['NetIncome_Eok'], name=f'순이익', marker_color='#FFB74D'))
-                    fig_k1.update_layout(title=f"10개년 분기별 매출/영업이익/순이익 ({unit_label})", height=360, barmode='group', template="plotly_dark", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", margin=dict(l=10, r=10, t=40, b=10))
+                    fig_k1.update_layout(title=f"전 기간 분기별 매출/영업이익/순이익 ({unit_label})", height=360, barmode='group', template="plotly_dark", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", margin=dict(l=10, r=10, t=40, b=10))
                     st.plotly_chart(fig_k1, use_container_width=True)
 
                 with kpi2:
@@ -539,7 +542,7 @@ try:
                     fig_k2.update_layout(title="순이익률(%) 및 매출 YoY 성장률(%)", height=360, template="plotly_dark", paper_bgcolor="#0E1117", plot_bgcolor="#0E1117", margin=dict(l=10, r=10, t=40, b=10))
                     st.plotly_chart(fig_k2, use_container_width=True)
 
-                with st.expander("📋 10개년 분기 실적 원본 데이터 확인"):
+                with st.expander("📋 전 기간 분기 실적 원본 데이터 확인"):
                     disp_t = q_fin_df.copy()
                     disp_t.index = [d.strftime('%Y-%m-%d') for d in disp_t.index]
                     st.dataframe(disp_t.style.format({'Revenue_Eok': '{:,.1f}', 'OperatingIncome_Eok': '{:,.1f}', 'NetIncome_Eok': '{:,.1f}', 'Net_Margin': '{:.1f}%', 'Rev_YoY': '{:+.1f}%'}), use_container_width=True)
