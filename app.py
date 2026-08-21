@@ -21,10 +21,12 @@ from concurrent.futures import ThreadPoolExecutor
 # 페이지 설정
 st.set_page_config(page_title="글로벌 종합 금융 프로 터미널", layout="wide", initial_sidebar_state="expanded")
 
-# ==================== 0. 정크 종목 필터 ====================
-def is_valid_normal_stock(name: str, code: str, curr_volume: float, curr_amount: float) -> bool:
+# ==================== 0. 정크 종목 및 코넥스 필터 ====================
+def is_valid_normal_stock(name: str, code: str, curr_volume: float, curr_amount: float, market: str = "") -> bool:
     if curr_volume <= 0 or curr_amount <= 0: return False
     if not (str(code).isdigit() and len(str(code)) == 6): return False
+    # 🎯 코넥스(KONEX) 제외: KOSPI, KOSDAQ만 허용
+    if str(market).strip().upper() == "KONEX": return False
     name_clean = str(name).strip()
     if any(k in name_clean for k in ["스팩", "기업인수목적", "리츠", "REIT", "인프라", "투융자"]): return False
     if re.search(r'(우|우B|우C|우\(전환\))$', name_clean): return False
@@ -95,6 +97,8 @@ st.title("📈 글로벌 종합 금융 인텔리전스 대시보드")
 def get_krx_stocks():
     try:
         df = fdr.StockListing('KRX')
+        if 'Market' in df.columns:
+            df = df[df['Market'].str.upper() != 'KONEX']
         df = df.sort_values(by='Marcap', ascending=False).head(150)
         return dict(zip(df['Name'], df['Code']))
     except Exception: return {"SK하이닉스": "000660", "삼성전자": "005930", "LG에너지솔루션": "373220", "현대차": "005380"}
@@ -235,14 +239,11 @@ def get_dart_corp_code_map(dart_key):
 
 def fetch_single_dart_report(args):
     dart_key, corp_code, y, r_code, end_day, q_num = args
-    
-    # 🎯 [핵심 수정] fnlttSinglAcntAll에 필수 fs_div(CFS/OFS) 파라미터 전달
     for fs_div in ["CFS", "OFS"]:
         try:
             url = f"https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json?crtfc_key={dart_key}&corp_code={corp_code}&bsns_year={y}&reprt_code={r_code}&fs_div={fs_div}"
             resp = requests.get(url, timeout=5).json()
             
-            # fnlttSinglAcntAll이 실패하면 주요계정 API로 폴백
             if resp.get("status") != "000" or "list" not in resp:
                 url_alt = f"https://opendart.fss.or.kr/api/fnlttSinglAcnt.json?crtfc_key={dart_key}&corp_code={corp_code}&bsns_year={y}&reprt_code={r_code}"
                 resp = requests.get(url_alt, timeout=4).json()
@@ -256,7 +257,6 @@ def fetch_single_dart_report(args):
                     val_str = str(it.get("thstrm_amount", "0")).replace(",", "")
                     val_num = pd.to_numeric(val_str, errors='coerce')
                     
-                    # 3개월 분기액(thstrm_q_amount)이 존재하면 우선 채택
                     if "thstrm_q_amount" in it and pd.notna(it.get("thstrm_q_amount")):
                         q_str = str(it.get("thstrm_q_amount", "")).replace(",", "")
                         q_num_val = pd.to_numeric(q_str, errors='coerce')
@@ -498,7 +498,7 @@ def load_global_full_history_financials(code):
 
     return pd.DataFrame()
 
-# ==================== ⚡ 사용자 맞춤 조건 수급 돌파 스캐너 ====================
+# ==================== ⚡ 사용자 맞춤 조건 수급 돌파 스캐너 (코넥스 제외) ====================
 @st.cache_data(ttl=300)
 def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
     try:
@@ -507,6 +507,10 @@ def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
         scan_date = sample_hist.index[-1].strftime('%Y-%m-%d') if (sample_hist is not None and not sample_hist.empty) else str(today)
         df_krx = fdr.StockListing('KRX')
         if df_krx.empty: return pd.DataFrame(), scan_date
+
+        # 🎯 1차 코넥스 필터링
+        if 'Market' in df_krx.columns:
+            df_krx = df_krx[df_krx['Market'].str.upper() != 'KONEX'].copy()
 
         amt_col = next((c for c in ['Amount', 'TradeValue', 'amount', 'VolumeValue'] if c in df_krx.columns), None)
         if amt_col is None and 'Volume' in df_krx.columns and 'Close' in df_krx.columns:
@@ -527,7 +531,9 @@ def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
             curr_amount = row[amt_col]
             curr_vol = row[vol_col] if vol_col else 1.0
             marcap_val = row.get('Marcap', 0)
-            if not is_valid_normal_stock(name, code, curr_vol, curr_amount): continue
+            market_val = row.get('Market', 'KRX')
+            
+            if not is_valid_normal_stock(name, code, curr_vol, curr_amount, market_val): continue
 
             try:
                 hist = fdr.DataReader(code, start_date)
@@ -551,7 +557,7 @@ def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
                                 '어제거래대금(억원)': round(yesterday_amt / 100_000_000, 1),
                                 f'{lookback_days}일평균(억원)': round(avg_period_amt / 100_000_000, 1),
                                 '수급폭증률': round(surge_ratio, 0), '시가총액(억원)': round(marcap_val / 100_000_000, 0),
-                                'Market': row.get('Market', 'KRX')
+                                'Market': market_val
                             })
             except Exception: continue
 
@@ -559,7 +565,7 @@ def scan_custom_volume_surge(lookback_days, threshold_won, min_chg_rate=0.0):
         return pd.DataFrame(results).sort_values(by='당일거래대금(억원)', ascending=False), scan_date
     except Exception: return pd.DataFrame(), str(datetime.date.today())
 
-# ==================== 🧊 장기 초소외주 스캐너 ====================
+# ==================== 🧊 장기 초소외주 스캐너 (코넥스 제외, KOSPI/KOSDAQ 전용) ====================
 @st.cache_data(ttl=600)
 def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_eok):
     try:
@@ -568,6 +574,10 @@ def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_e
         scan_date = sample_hist.index[-1].strftime('%Y-%m-%d') if (sample_hist is not None and not sample_hist.empty) else str(today)
         df_krx = fdr.StockListing('KRX')
         if df_krx.empty: return pd.DataFrame(), scan_date
+
+        # 🎯 1차 코넥스 원천 배제
+        if 'Market' in df_krx.columns:
+            df_krx = df_krx[df_krx['Market'].str.upper() != 'KONEX'].copy()
 
         amt_col = next((c for c in ['Amount', 'TradeValue', 'amount', 'VolumeValue'] if c in df_krx.columns), None)
         if amt_col is None and 'Volume' in df_krx.columns and 'Close' in df_krx.columns:
@@ -590,7 +600,9 @@ def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_e
             marcap_val = row.get('Marcap', 0)
             curr_amt_krx = row[amt_col]
             curr_vol_krx = row[vol_col] if vol_col else 1.0
-            if not is_valid_normal_stock(name, code, curr_vol_krx, curr_amt_krx): continue
+            market_val = row.get('Market', 'KRX')
+            
+            if not is_valid_normal_stock(name, code, curr_vol_krx, curr_amt_krx, market_val): continue
 
             try:
                 hist = fdr.DataReader(code, start_date)
@@ -612,7 +624,7 @@ def scan_dormant_stocks(lookback_days, max_cap_won, min_marcap_eok, max_marcap_e
                             f'{lookback_days}일평균거래대금(억원)': round(avg_amt / 100_000_000, 2),
                             '당일거래대금(억원)': round(curr_amt / 100_000_000, 2),
                             '시가총액(억원)': round(marcap_val / 100_000_000, 0),
-                            'Market': row.get('Market', 'KRX')
+                            'Market': market_val
                         })
             except Exception: continue
 
@@ -693,7 +705,7 @@ try:
             i_min_chg = c3.selectbox("📈 최소 당일 상승률", [0.0, 3.0, 5.0, 7.0, 10.0, 15.0], 0, format_func=lambda x: "전체" if x == 0.0 else f"+{x:.0f}% 이상")
             c4.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
             if c4.button("🔍 조건 검색 실행", type="primary", use_container_width=True):
-                with st.spinner("KRX 전 종목 스캔 중..."):
+                with st.spinner("KRX (KOSPI/KOSDAQ) 전 종목 스캔 중..."):
                     st.session_state["scan_results_df"], st.session_state["scan_results_date"] = scan_custom_volume_surge(i_lookback, i_threshold * 100_000_000, i_min_chg)
                     st.session_state["last_scanned_params"] = {"lookback": i_lookback, "threshold": i_threshold}
 
@@ -711,7 +723,7 @@ try:
                     st.dataframe(s_df.style.format({'Close': '{:,.0f}원', 'ChgRate': '{:+.2f}%', '당일거래대금(억원)': '{:,.1f} 억'}), use_container_width=True)
 
         elif active_tab == "🧊 장기 초소외주 (1년 거래대금 100억 미만) 탐색기":
-            st.markdown("### 🧊 장기 초소외주 / 품절주 전수 탐색기")
+            st.markdown("### 🧊 장기 초소외주 / 품절주 전수 탐색기 (KOSPI/KOSDAQ)")
             d1, d2, d3, d4, d5 = st.columns([1.1, 1.1, 1.0, 1.0, 1.0])
             dl = d1.number_input("📅 추적 기간 (일수)", 30, 500, 365, 30)
             dm = d2.number_input("🚫 최대 거래대금 상한선 (억원)", 1, 500, 100, 10)
@@ -719,7 +731,7 @@ try:
             dmax = d4.number_input("💎 최대 시총 (억원)", 100, 50000, 3000, 500)
             d5.markdown("<div style='height: 28px;'></div>", unsafe_allow_html=True)
             if d5.button("🧊 소외주 전수 스캔", type="primary", use_container_width=True):
-                with st.spinner("초소외주 분석 중..."):
+                with st.spinner("KOSPI / KOSDAQ 초소외주 분석 중..."):
                     st.session_state["dormant_scan_results"], st.session_state["dormant_scan_date"] = scan_dormant_stocks(dl, dm * 100_000_000, dmin, dmax)
                     st.session_state["dormant_params"] = {"lookback": dl, "max_amt": dm}
 
